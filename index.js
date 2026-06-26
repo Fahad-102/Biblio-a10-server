@@ -10,6 +10,7 @@ app.use(cors());
 app.use(express.json()); 
 
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const { createRemoteJWKSet, jwtVerify } = require('jose-cjs');
 const uri = process.env.MONGODB_URI;
 
 const client = new MongoClient(uri, {
@@ -20,12 +21,50 @@ const client = new MongoClient(uri, {
   }  
 });  
 
+const JWKS = createRemoteJWKSet(new URL(`${process.env.CLIENT_URL}/api/auth/jwks`))
+
+const verifyToken = async (req,res,next)=>{
+  const authHeader = req.headers.authorization;
+  console.log(authHeader)
+  if(!authHeader || !authHeader.startsWith("Bearer")){
+    return res.status(401).json({msg:"Unauthorized"});
+  }
+
+  const token = authHeader.split(" ")[1]
+
+  if(!token){
+    return res.status(401).json({msg:"Unauthorized"});
+  }
+
+  try {
+    const {payload} = await jwtVerify(token,JWKS) 
+    req.user = payload
+    next()
+  } catch (error) {
+    console.log(error)
+    return res.status(401).json({msg:"Unauthorized"}); 
+  }
+}
+
+const librarianVerify = async (req,res,next)=>{
+  const user = req.user;
+  if(user.role !== "librarian" ){
+        return res.status(403).json({msg:"Forbidden"}); 
+
+   }
+  console.log("User from librarianVerify",user)
+  next()
+}
+
 async function run() {
   try {
     await client.connect();
     const db = client.db("biblio-drop_db");
     const subscriptionCollection = db.collection("subscription");
     const userCollection = db.collection("user");
+    const booksCollection = db.collection("books")
+
+
 
     app.post("/subscription", async (req, res) => {
       try {
@@ -56,7 +95,7 @@ async function run() {
 
         await userCollection.updateOne(
           query,
-          { $set: { role: "user_pro" } }
+          { $set: { plan: "user_pro" } }
         );
 
         res.json({ msg: "Payment successful and user upgraded to user_pro" });
@@ -65,6 +104,14 @@ async function run() {
         console.error("Error in /subscription route:", routeError);
         res.status(500).json({ error: "Internal Server Error" });
       }
+    });
+
+
+    app.post("/librarian/books", verifyToken,librarianVerify ,async(req,res)=>{
+      const data = req.body
+      const result = await booksCollection.insertOne(data)
+
+      res.json(result);
     });
 
     // Send a ping to confirm a successful connection
