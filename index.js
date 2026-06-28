@@ -118,7 +118,7 @@ async function run() {
     app.get("/books",async(req,res)=>{
       const {search}= req.query
       const query = {}
-      if(search){
+      if(search && search != "undefined") {
         query.$or =[
           {title: {$regex: search,$options: 'i'}},
           {description: {$regex: search,$options: 'i'}},
