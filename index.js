@@ -109,11 +109,34 @@ async function run() {
 
     app.post("/librarian/books", verifyToken,librarianVerify ,async(req,res)=>{
       const data = req.body
-      const result = await booksCollection.insertOne(data)
+      
+      const result = await booksCollection.insertOne({...data, userId: req.user.id})
 
       res.json(result);
     });
 
+    app.get("/books",async(req,res)=>{
+      const {search}= req.query
+      const query = {}
+      if(search){
+        query.$or =[
+          {title: {$regex: search,$options: 'i'}},
+          {description: {$regex: search,$options: 'i'}},
+        ];
+      };
+      const result = await booksCollection.find(query).toArray()
+      res.send(result)
+    })
+
+
+    app.get("/librarian/books",verifyToken,librarianVerify,async(req,res)=>{
+      const {page=1, limit=10}= req.query;
+      const skip = (Number(page) - 1)* Number(limit)
+      const result = await booksCollection.find({userId: req.user.id}).skip(skip).limit(Number(limit)).toArray()
+      const totalData = await booksCollection.countDocuments({userId: req.user.id})
+      const totalPage = Math.ceil(totalData/Number(limit))
+      res.send({data:result, page: Number(page),totalPage })
+    })
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
