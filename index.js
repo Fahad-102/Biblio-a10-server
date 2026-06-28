@@ -21,41 +21,35 @@ const client = new MongoClient(uri, {
   }  
 });  
 
-const JWKS = createRemoteJWKSet(new URL(`${process.env.CLIENT_URL}/api/auth/jwks`))
+const JWKS = createRemoteJWKSet(new URL(`${process.env.CLIENT_URL}/api/auth/jwks`));
 
 // Middleware: Token Verification
 const verifyToken = async (req, res, next) => {
   const authHeader = req.headers.authorization;
-  console.log(authHeader)
-  if (!authHeader || !authHeader.startsWith("Bearer")) {
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return res.status(401).json({ msg: "Unauthorized" });
   }
 
-  const token = authHeader.split(" ")[1]
-
-  if (!token) {
-    return res.status(401).json({ msg: "Unauthorized" });
-  }
+  const token = authHeader.split(" ")[1];
 
   try {
-    const { payload } = await jwtVerify(token, JWKS) 
-    req.user = payload
-    next()
+    const { payload } = await jwtVerify(token, JWKS); 
+    req.user = payload;
+    next();
   } catch (error) {
-    console.log(error)
+    console.error("JWT Verification Error:", error.message);
     return res.status(401).json({ msg: "Unauthorized" }); 
   }
-}
+};
 
 // Middleware: Librarian Verification
 const librarianVerify = async (req, res, next) => {
   const user = req.user;
-  if (user.role !== "librarian") {
+  if (!user || user.role !== "librarian") {
     return res.status(403).json({ msg: "Forbidden" }); 
   }
-  console.log("User from librarianVerify", user)
-  next()
-}
+  next();
+};
 
 async function run() {
   try {
@@ -64,6 +58,7 @@ async function run() {
     const subscriptionCollection = db.collection("subscription");
     const userCollection = db.collection("user");
     const booksCollection = db.collection("books");
+    const paymentCollection = db.collection("payment")
 
     // --- 1. Subscription Route ---
     app.post("/subscription", async (req, res) => {
@@ -76,7 +71,7 @@ async function run() {
 
         const isExist = await subscriptionCollection.findOne({ sessionId: sessionid });
         if (isExist) {
-          return res.json({ msg: "Subscription already processed" });
+          return res.status(400).json({ msg: "Subscription already processed" });
         }
 
         await subscriptionCollection.insertOne({
@@ -105,22 +100,46 @@ async function run() {
       }
     });
 
-    // --- 2. Public Books Route (With Pagination & Search) ---
+    
 
-    app.get("/books/:id", async (req,res)=>{
-      const {param} = req.params;
-    const result = await booksCollection.findOne({id:new ObjectId(id)})
+    // --- 2. Public Books Route (Single Book) ---
+    app.get("/books/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ error: "Invalid book ID format" });
+        }
 
-    res.send(result)
-    })
+        const result = await booksCollection.findOne({ _id: new ObjectId(id) });
+        if (!result) {
+          return res.status(404).json({ error: "Book not found" });
+        }
+        res.send(result);
+      } catch (error) {
+        console.error("Error in /books/:id route:", error);
+        res.status(500).json({ error: "Internal Server Error" });
+      }
+    });
 
+     app.patch("/books/:id", async (req, res) => {
+        const { id } = req.params;
+        const updatedData = req.body;
+
+        const result = await booksCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {$set: updatedData}
+        );
+        res.send(result);
+    });
+
+    // --- 3. Public Books Route (With Pagination & Search) ---
     app.get("/books", async (req, res) => {
       try {
         const { search, page = 1, limit = 8 } = req.query;
         const skip = (Number(page) - 1) * Number(limit);
         const query = {};
 
-        if (search && search !== "undefined") {
+        if (search && search !== "undefined" && search.trim() !== "") {
           query.$or = [
             { title: { $regex: search, $options: 'i' } },
             { description: { $regex: search, $options: 'i' } },
@@ -148,21 +167,37 @@ async function run() {
       }
     });
 
-    // --- 3. Librarian: Add Book ---
+    // --- 4. Librarian: Add Book ---
     app.post("/librarian/books", verifyToken, librarianVerify, async (req, res) => {
-      const data = req.body
-      const result = await booksCollection.insertOne({ ...data, userId: req.user.id })
-      res.json(result);
+      try {
+        const data = req.body;
+        // Fallback to standard jwt claim structures if req.user.id isn't directly populated
+        const userId = req.user.id || req.user.sub; 
+        
+        const result = await booksCollection.insertOne({ ...data, userId });
+        res.status(201).json(result);
+      } catch (error) {
+        console.error("Error adding book:", error);
+        res.status(500).json({ error: "Internal Server Error" });
+      }
     });
 
-    // --- 4. Librarian: Get Books (With Pagination) ---
+    // --- 5. Librarian: Get Books (With Pagination) ---
     app.get("/librarian/books", verifyToken, librarianVerify, async (req, res) => {
-      const { page = 1, limit = 10 } = req.query;
-      const skip = (Number(page) - 1) * Number(limit)
-      const result = await booksCollection.find({ userId: req.user.id }).skip(skip).limit(Number(limit)).toArray()
-      const totalData = await booksCollection.countDocuments({ userId: req.user.id })
-      const totalPage = Math.ceil(totalData / Number(limit))
-      res.send({ data: result, page: Number(page), totalPage })
+      try {
+        const { page = 1, limit = 10 } = req.query;
+        const skip = (Number(page) - 1) * Number(limit);
+        const userId = req.user.id || req.user.sub;
+
+        const result = await booksCollection.find({ userId }).skip(skip).limit(Number(limit)).toArray();
+        const totalData = await booksCollection.countDocuments({ userId });
+        const totalPage = Math.ceil(totalData / Number(limit));
+        
+        res.send({ data: result, page: Number(page), totalPage, totalData });
+      } catch (error) {
+        console.error("Error fetching librarian books:", error);
+        res.status(500).json({ error: "Internal Server Error" });
+      }
     });
 
     // Confirm connection
