@@ -131,6 +131,16 @@ async function run() {
         );
         res.send(result);
     });
+     app.delete("/books/:id", async (req, res) => {
+        const { id } = req.params;
+        const updatedData = req.body;
+
+        const result = await booksCollection.deleteOne(
+          { _id: new ObjectId(id) },
+        );
+        res.send(result);
+    });
+
 
     // --- 3. Public Books Route (With Pagination & Search) ---
     app.get("/books", async (req, res) => {
