@@ -67,38 +67,35 @@ reviewCollection = db.collection("reviews");
 const verifyToken = async (req, res, next) => {
   try {
     await dbConnect();
-    
-    const cookieHeader = req.headers.cookie || "";
-    
-    // কুকি থেকে টোকেন বের করার সঠিক লজিক
-    const getCookie = (name) => {
-      const match = cookieHeader.match(new RegExp('(^| )' + name + '=([^;]+)'));
-      return match ? match[2].split('.')[0] : null; // টোকেনের ডট (.) এর আগের অংশটুকু নিচ্ছি
-    };
 
-    // প্রথমে সিকিউর টোকেন চেক করবে, না পেলে সাধারণটি
-    const sessionToken = getCookie('__Secure-better-auth.session_token') || getCookie('better-auth.session_token');
+    // ব্রাউজারের কুকি থেকে টোকেন নিন
+    const rawCookie = req.cookies['__Secure-better-auth.session_token'] || req.cookies['better-auth.session_token'];
+    
+    // অনেক সময় বেটার অথ টোকেন 'token.hash' ফরম্যাটে থাকে, তাই ডট দিয়ে স্প্লিট করছি
+    const sessionToken = rawCookie ? rawCookie.split('.')[0] : null;
 
-    console.log("DEBUG: Extracted Session Token:", sessionToken);
+    console.log("DEBUG: Extracted Session Token from Cookie:", sessionToken);
 
     if (!sessionToken) {
-      return res.status(401).json({ msg: "No session token found" });
+      return res.status(401).json({ msg: "No session token found in cookies" });
     }
 
+    // ডাটাবেসে সার্চ করুন
     const session = await client.db("biblio-drop_db").collection("session").findOne({ token: sessionToken });
 
     if (!session) {
-      console.log("DEBUG: No session in DB for token:", sessionToken);
+      console.log("DEBUG: No session found for token:", sessionToken);
       return res.status(401).json({ msg: "Invalid Session" });
     }
 
+    // ইউজার খুঁজে বের করুন
     const user = await client.db("biblio-drop_db").collection("user").findOne({ _id: new ObjectId(session.userId) });
 
     if (!user) {
       return res.status(401).json({ msg: "User not found" });
     }
 
-    req.user = { ...user, _id: user._id, id: user._id.toString() };
+    req.user = { ...user, id: user._id.toString() };
     next();
   } catch (err) {
     console.error("Auth Error:", err);
