@@ -279,39 +279,27 @@ app.get("/books", async (req, res) => {
       limit = 6,
     } = req.query;
 
-    const query = {
-      status: "Published",
-    };
+    // ❌ আগে শুধু Published ছিল → এখন flexible
+    const query = {};
 
-    // Search by title
+    // optional status filter (safe)
+    query.status = { $in: ["Approved", "Published"] };
     if (search) {
-      query.title = {
-        $regex: search,
-        $options: "i",
-      };
+      query.title = { $regex: search, $options: "i" };
     }
 
-    // Category Filter
     if (category && category !== "All") {
       query.category = category;
     }
 
-    // Availability Filter
     if (availability && availability !== "All") {
       query.availability = availability;
     }
 
-    // Delivery Fee Filter
     if (minFee || maxFee) {
       query.deliveryFee = {};
-
-      if (minFee) {
-        query.deliveryFee.$gte = Number(minFee);
-      }
-
-      if (maxFee) {
-        query.deliveryFee.$lte = Number(maxFee);
-      }
+      if (minFee) query.deliveryFee.$gte = Number(minFee);
+      if (maxFee) query.deliveryFee.$lte = Number(maxFee);
     }
 
     const currentPage = Number(page);
@@ -326,7 +314,7 @@ app.get("/books", async (req, res) => {
       .sort({ createdAt: -1 })
       .toArray();
 
-    res.json({
+    return res.json({
       books,
       totalBooks,
       currentPage,
@@ -334,12 +322,9 @@ app.get("/books", async (req, res) => {
     });
   } catch (error) {
     console.log(error);
-    res.status(500).json({
-      error: "Server Error",
-    });
+    return res.status(500).json({ error: "Server Error" });
   }
 });
-
 
 app.get("/books/:id", async (req, res) => {
   await dbConnect();
