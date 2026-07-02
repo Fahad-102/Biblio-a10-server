@@ -69,17 +69,26 @@ const verifyToken = async (req, res, next) => {
     await dbConnect();
     
     const cookieHeader = req.headers.cookie || "";
-    const sessionToken = cookieHeader.split('session_token=')
-                                    .pop()
-                                    .split('.')[0]
-                                    .replace('__Secure-better-auth', '');
+    
+    // কুকি থেকে টোকেন বের করার সঠিক লজিক
+    const getCookie = (name) => {
+      const match = cookieHeader.match(new RegExp('(^| )' + name + '=([^;]+)'));
+      return match ? match[2].split('.')[0] : null; // টোকেনের ডট (.) এর আগের অংশটুকু নিচ্ছি
+    };
 
-    console.log("DEBUG: Final Clean Token:", sessionToken);
+    // প্রথমে সিকিউর টোকেন চেক করবে, না পেলে সাধারণটি
+    const sessionToken = getCookie('__Secure-better-auth.session_token') || getCookie('better-auth.session_token');
+
+    console.log("DEBUG: Extracted Session Token:", sessionToken);
+
+    if (!sessionToken) {
+      return res.status(401).json({ msg: "No session token found" });
+    }
 
     const session = await client.db("biblio-drop_db").collection("session").findOne({ token: sessionToken });
 
     if (!session) {
-      console.log("DEBUG: No session in DB for:", sessionToken);
+      console.log("DEBUG: No session in DB for token:", sessionToken);
       return res.status(401).json({ msg: "Invalid Session" });
     }
 
@@ -89,36 +98,27 @@ const verifyToken = async (req, res, next) => {
       return res.status(401).json({ msg: "User not found" });
     }
 
-    req.user = { ...user, id: user._id.toString() };
+    req.user = { ...user, _id: user._id, id: user._id.toString() };
     next();
   } catch (err) {
     console.error("Auth Error:", err);
     res.status(500).json({ msg: "Server Error" });
   }
 };
+
+
+
 // Base Route
 app.get('/', (req, res) => res.json({ message: 'Server is running!' }));
 
 
 // DASHBOARD SUMMARY API 
 app.get("/api/dashboard-stats", verifyToken, async (req, res) => {
-
   await dbConnect();
   try {
-   if (!req.user?._id) {
-  return res.status(401).json({ msg: "Unauthorized" });
-}
-
-let userId;
-
-try {
-  userId = new ObjectId(req.user._id);
-} catch (e) {
-  return res.status(400).json({ msg: "Invalid user id" });
-}
-    const userRole = (req.user.role || '').toLowerCase(); 
+    const userId = req.user.id; // এটি স্ট্রিং আইডি
+    const userRole = (req.user.role || '').toLowerCase();
     
-
     let stats = {};
 
     if (userRole === 'admin') {
@@ -129,25 +129,58 @@ try {
         pendingBooks: await booksCollection.countDocuments({ status: "Pending" }),
         totalRevenue: revenue[0]?.total || 0
       };
-    } else if (userRole === 'librarian') {
-      const query = { userId: new ObjectId(req.user._id) };
+    } 
+    else if (userRole === 'librarian') {
+      // এখানে আমরা নিশ্চিত করছি যে আইডিটি স্ট্রিং বা ObjectId যাই হোক কাজ করবে
+      const query = { userId: userId }; 
+      const queryObj = { userId: new ObjectId(userId) };
+
+      // ডাটাবেসে userId কীভাবে আছে তা অনুযায়ী কুয়েরি
+      const myBooks = await booksCollection.countDocuments(query);
+      const myBooksObj = await booksCollection.countDocuments(queryObj);
+      const actualMyBooks = myBooks > 0 ? myBooks : myBooksObj;
 
       stats = {
-        myBooks: await booksCollection.countDocuments(query),
+        myBooks: actualMyBooks,
         pendingRequests: await booksCollection.countDocuments({ ...query, status: "Pending" }),
+        approvedBooks: await booksCollection.countDocuments({ ...query, status: "Approved" }),
         totalEarnings: 0
       };
-    } else {
+    } 
+    else {
       const spent = await paymentCollection.aggregate([{ $match: { userId: userId } }, { $group: { _id: null, total: { $sum: "$amount" } } }]).toArray();
       stats = {
         totalBorrowed: await booksCollection.countDocuments({ borrowerId: userId }),
         totalSpent: spent[0]?.total || 0
       };
     }
+    
+    console.log("DEBUG: Final Stats for Librarian:", stats);
     res.json(stats);
-  } catch (e) { 
+  } catch (e) {
     console.error("Dashboard Stats Error:", e);
-    res.status(500).json({ error: "Server Error" }); 
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+// ২. LIBRARIAN OVERVIEW API (সংশোধিত)
+app.get("/api/librarian/overview", verifyToken, async (req, res) => {
+  await dbConnect();
+  try {
+    const librarianId = req.user.id;
+    const myBooks = await booksCollection.countDocuments({ userId: librarianId });
+    const approvedBooks = await booksCollection.countDocuments({ userId: librarianId, status: "Approved" });
+    const pendingBooks = await booksCollection.countDocuments({ userId: librarianId, status: "Pending" });
+    const totalRequests = await deliveryCollection.countDocuments({ librarianId });
+
+    res.json({
+      myBooks,
+      publishedBooks: approvedBooks, // ফ্রন্টএন্ডে এটি publishedBooks নামে ডাটা পাঠাবে
+      pendingBooks,
+      totalRequests
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Server Error" });
   }
 });
 
@@ -158,7 +191,7 @@ app.get("/api/user/delivery-history", verifyToken, async (req, res) => {
   try {
     const history = await deliveryCollection
       .find({
-        userId: new ObjectId(req.user._id),
+        userId: new ObjectId(req.user.id),
       })
       .sort({
         requestedAt: -1,
@@ -179,7 +212,7 @@ app.get("/api/user/delivery-history", verifyToken, async (req, res) => {
 app.get("/api/user/summary", verifyToken, async (req, res) => {
   await dbConnect();
   try {
-    const userId = req.user._id.toString();
+    const userId = req.user.id;
 
     const currentlyReading = await booksCollection.countDocuments({ borrowerId: userId, status: "Borrowed" });
     const totalBorrowed = await booksCollection.countDocuments({ borrowerId: userId });
@@ -279,27 +312,39 @@ app.get("/books", async (req, res) => {
       limit = 6,
     } = req.query;
 
-    // ❌ আগে শুধু Published ছিল → এখন flexible
-    const query = {};
+    const query = {
+      status: "Approved",
+    };
 
-    // optional status filter (safe)
-    query.status = { $in: ["Approved", "Published"] };
+    // Search by title
     if (search) {
-      query.title = { $regex: search, $options: "i" };
+      query.title = {
+        $regex: search,
+        $options: "i",
+      };
     }
 
+    // Category Filter
     if (category && category !== "All") {
       query.category = category;
     }
 
+    // Availability Filter
     if (availability && availability !== "All") {
       query.availability = availability;
     }
 
+    // Delivery Fee Filter
     if (minFee || maxFee) {
       query.deliveryFee = {};
-      if (minFee) query.deliveryFee.$gte = Number(minFee);
-      if (maxFee) query.deliveryFee.$lte = Number(maxFee);
+
+      if (minFee) {
+        query.deliveryFee.$gte = Number(minFee);
+      }
+
+      if (maxFee) {
+        query.deliveryFee.$lte = Number(maxFee);
+      }
     }
 
     const currentPage = Number(page);
@@ -314,7 +359,7 @@ app.get("/books", async (req, res) => {
       .sort({ createdAt: -1 })
       .toArray();
 
-    return res.json({
+    res.json({
       books,
       totalBooks,
       currentPage,
@@ -322,9 +367,12 @@ app.get("/books", async (req, res) => {
     });
   } catch (error) {
     console.log(error);
-    return res.status(500).json({ error: "Server Error" });
+    res.status(500).json({
+      error: "Server Error",
+    });
   }
 });
+
 
 app.get("/books/:id", async (req, res) => {
   await dbConnect();
@@ -487,7 +535,7 @@ app.post("/api/deliveries", verifyToken, async (req, res) => {
       });
     }
 
-    if (book.status !== "Published") {
+    if (book.status !== "Approved") {
       return res.status(400).json({
         success: false,
         message: "Book unavailable.",
@@ -614,11 +662,11 @@ app.patch("/api/librarian/books/unpublish/:id", verifyToken, async (req, res) =>
       {
         _id: new ObjectId(id),
         userId: new ObjectId(req.user._id),
-        status: "Published",
+        status: "Approved",
       },
       {
         $set: {
-          status: "Unpublished",
+          status: "UnApproved",
         },
       }
     );
@@ -830,7 +878,7 @@ app.get("/api/admin/books", verifyToken, isAdmin, async (req, res) => {
 
     console.log("BOOKS COUNT:", books.length); // 🔥 debug
 
-    res.json(books);
+  res.json(books);
   } catch (err) {
     console.log(err);
     res.status(500).json({ error: "Server Error" });
@@ -842,7 +890,7 @@ app.patch("/api/admin/books/approve/:id", verifyToken, isAdmin, async (req, res)
 
   await booksCollection.updateOne(
     { _id: new ObjectId(req.params.id) },
-    { $set: { status: "Published" } }
+    { $set: { status: "Approved" } }
   );
 
   res.json({ success: true });
@@ -885,47 +933,39 @@ app.get("/api/admin/transactions", verifyToken, isAdmin, async (req, res) => {
 
 app.get("/api/librarian/overview", verifyToken, async (req, res) => {
   await dbConnect();
-
   try {
-    const librarianId = new ObjectId(req.user._id);
+    // ১. আইডিটিকে নিশ্চিতভাবে ObjectId তে রূপান্তর করা
+    const librarianId = new ObjectId(req.user.id);
+    
+    // ২. ফিল্টার কনসোল লগ করে দেখুন ফিল্টারটি কেমন দেখাচ্ছে
+    const query = { userId: librarianId };
+    console.log("DEBUG: Final Query Filter:", query);
 
-    const myBooks = await booksCollection.countDocuments({
-      userId: librarianId,
-    });
+    // ৩. ডাটাবেস কুয়েরি
+    const myBooks = await booksCollection.countDocuments(query);
+    const approvedBooks = await booksCollection.countDocuments({ ...query, status: "Approved" });
+    const pendingBooks = await booksCollection.countDocuments({ ...query, status: "Pending" });
+    const totalRequests = await deliveryCollection.countDocuments({ librarianId: librarianId });
 
-    const publishedBooks = await booksCollection.countDocuments({
-      userId: librarianId,
-      status: "Published",
-    });
-
-    const pendingBooks = await booksCollection.countDocuments({
-      userId: librarianId,
-      status: "Pending",
-    });
-
-    const totalRequests = await deliveryCollection.countDocuments({
-      librarianId,
-    });
+    console.log("DEBUG: Found myBooks:", myBooks);
 
     res.json({
       myBooks,
-      publishedBooks,
+      publishedBooks: approvedBooks,
       pendingBooks,
-      totalRequests,
+      totalRequests
     });
   } catch (err) {
-    res.status(500).json({
-      error: "Server Error",
-    });
+    console.error("Error:", err);
+    res.status(500).json({ error: "Server Error" });
   }
 });
-
 
 app.get("/api/librarian/transactions", verifyToken, async (req, res) => {
   await dbConnect();
 
   try {
-    const librarianId = new ObjectId(req.user._id);
+    const librarianId = req.user.id; // এটি স্ট্রিং '6a3d127c37aae54a90864702' দিবে
 
     const transactions = await deliveryCollection
       .find({
@@ -946,52 +986,23 @@ app.get("/api/librarian/transactions", verifyToken, async (req, res) => {
 });
 
 
-
 app.get("/api/librarian/chart", verifyToken, async (req, res) => {
   await dbConnect();
-
   try {
-    const librarianId = new ObjectId(req.user._id);
-
-    const pending = await booksCollection.countDocuments({
-      userId: librarianId,
-      status: "Pending",
-    });
-
-    const published = await booksCollection.countDocuments({
-      userId: librarianId,
-      status: "Published",
-    });
-
-    const unpublished = await booksCollection.countDocuments({
-      userId: librarianId,
-      status: "Unpublished",
-    });
+    const librarianId = new ObjectId(req.user.id);
+    const pending = await booksCollection.countDocuments({ userId: librarianId, status: "Pending" });
+    const approved = await booksCollection.countDocuments({ userId: librarianId, status: "Approved" });
+    const unApproved = await booksCollection.countDocuments({ userId: librarianId, status: "UnApproved" });
 
     res.json([
       { name: "Pending", value: pending },
-      { name: "Published", value: published },
-      { name: "Unpublished", value: unpublished },
+      { name: "Published", value: approved },
+      { name: "Unpublished", value: unApproved },
     ]);
   } catch (err) {
-    res.status(500).json({
-      error: "Server Error",
-    });
+    res.status(500).json({ error: "Server Error" });
   }
 });
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // Export for Vercel
 module.exports = app;
