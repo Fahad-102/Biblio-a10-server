@@ -68,19 +68,20 @@ const verifyToken = async (req, res, next) => {
   try {
     await dbConnect();
 
-    // ব্রাউজারের কুকি থেকে টোকেন নিন
-    const rawCookie = req.cookies['__Secure-better-auth.session_token'] || req.cookies['better-auth.session_token'];
-    
-    // অনেক সময় বেটার অথ টোকেন 'token.hash' ফরম্যাটে থাকে, তাই ডট দিয়ে স্প্লিট করছি
-    const sessionToken = rawCookie ? rawCookie.split('.')[0] : null;
+    // হেডার অথবা কুকি থেকে টোকেন নিন
+    const authHeader = req.headers.authorization;
+    let rawToken = (authHeader && authHeader.split(" ")[1]) || 
+                   req.cookies['__Secure-better-auth.session_token'] || 
+                   req.cookies['better-auth.session_token'];
 
-    console.log("DEBUG: Extracted Session Token from Cookie:", sessionToken);
-
-    if (!sessionToken) {
-      return res.status(401).json({ msg: "No session token found in cookies" });
+    if (!rawToken) {
+      return res.status(401).json({ msg: "No token found" });
     }
 
-    // ডাটাবেসে সার্চ করুন
+    const sessionToken = rawToken.split('.')[0]; 
+    
+    console.log("DEBUG: Checking Database for Token:", sessionToken);
+
     const session = await client.db("biblio-drop_db").collection("session").findOne({ token: sessionToken });
 
     if (!session) {
@@ -88,21 +89,13 @@ const verifyToken = async (req, res, next) => {
       return res.status(401).json({ msg: "Invalid Session" });
     }
 
-    // ইউজার খুঁজে বের করুন
     const user = await client.db("biblio-drop_db").collection("user").findOne({ _id: new ObjectId(session.userId) });
-
-    if (!user) {
-      return res.status(401).json({ msg: "User not found" });
-    }
-
     req.user = { ...user, id: user._id.toString() };
     next();
   } catch (err) {
-    console.error("Auth Error:", err);
     res.status(500).json({ msg: "Server Error" });
   }
 };
-
 
 
 // Base Route
@@ -113,7 +106,7 @@ app.get('/', (req, res) => res.json({ message: 'Server is running!' }));
 app.get("/api/dashboard-stats", verifyToken, async (req, res) => {
   await dbConnect();
   try {
-    const userId = req.user.id; // এটি স্ট্রিং আইডি
+    const userId = req.user.id; 
     const userRole = (req.user.role || '').toLowerCase();
     
     let stats = {};
@@ -128,11 +121,11 @@ app.get("/api/dashboard-stats", verifyToken, async (req, res) => {
       };
     } 
     else if (userRole === 'librarian') {
-      // এখানে আমরা নিশ্চিত করছি যে আইডিটি স্ট্রিং বা ObjectId যাই হোক কাজ করবে
+    
       const query = { userId: userId }; 
       const queryObj = { userId: new ObjectId(userId) };
 
-      // ডাটাবেসে userId কীভাবে আছে তা অনুযায়ী কুয়েরি
+      
       const myBooks = await booksCollection.countDocuments(query);
       const myBooksObj = await booksCollection.countDocuments(queryObj);
       const actualMyBooks = myBooks > 0 ? myBooks : myBooksObj;
@@ -160,7 +153,7 @@ app.get("/api/dashboard-stats", verifyToken, async (req, res) => {
   }
 });
 
-// ২. LIBRARIAN OVERVIEW API (সংশোধিত)
+
 app.get("/api/librarian/overview", verifyToken, async (req, res) => {
   await dbConnect();
   try {
@@ -172,7 +165,7 @@ app.get("/api/librarian/overview", verifyToken, async (req, res) => {
 
     res.json({
       myBooks,
-      publishedBooks: approvedBooks, // ফ্রন্টএন্ডে এটি publishedBooks নামে ডাটা পাঠাবে
+      publishedBooks: approvedBooks, 
       pendingBooks,
       totalRequests
     });
@@ -188,7 +181,7 @@ app.get("/api/user/delivery-history", verifyToken, async (req, res) => {
   try {
     const history = await deliveryCollection
       .find({
-        userId: new ObjectId(req.user.id),
+        userId: new ObjectId(req.user._id),
       })
       .sort({
         requestedAt: -1,
@@ -209,7 +202,7 @@ app.get("/api/user/delivery-history", verifyToken, async (req, res) => {
 app.get("/api/user/summary", verifyToken, async (req, res) => {
   await dbConnect();
   try {
-    const userId = req.user.id;
+    const userId = req.user._id.toString();
 
     const currentlyReading = await booksCollection.countDocuments({ borrowerId: userId, status: "Borrowed" });
     const totalBorrowed = await booksCollection.countDocuments({ borrowerId: userId });
