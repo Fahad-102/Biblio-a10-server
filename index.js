@@ -1,6 +1,8 @@
 const express = require('express');
+const cookieParser = require('cookie-parser');
 const cors = require('cors');
 require('dotenv').config();
+
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -13,6 +15,7 @@ app.use(cors({
   ],
   credentials: true
 }));
+app.use(cookieParser());
 app.use(express.json()); 
 
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
@@ -28,47 +31,166 @@ const client = new MongoClient(uri, {
   }   
 });   
 
-const JWKS = createRemoteJWKSet(new URL(`${process.env.CLIENT_URL || 'http://localhost:3000'}/api/auth/jwks`));
+
+const currentClientUrl = process.env.NODE_ENV === 'production' 
+  ? "https://biblio-drop-a10.vercel.app" 
+  : "http://localhost:3000";
+
+const JWKS = createRemoteJWKSet(new URL(`${currentClientUrl}/api/auth/jwks`));
 
 // Database Globals
-let subscriptionCollection, userCollection, booksCollection, paymentCollection;
+let subscriptionCollection,
+    userCollection,
+    booksCollection,
+    paymentCollection,
+    deliveryCollection,
+    reviewCollection;
 
 async function dbConnect() {
-  if (subscriptionCollection) return; // অলরেডি কানেক্টেড থাকলে আর করবে না
+  if (subscriptionCollection) return; 
   try {
     await client.connect();
-    const db = client.db("biblio-drop_db");
+    const db = client.db("biblio-drop_db"); 
     subscriptionCollection = db.collection("subscription");
-    userCollection = db.collection("user");
+    userCollection = db.collection("user"); 
     booksCollection = db.collection("books");
     paymentCollection = db.collection("payment");
+    deliveryCollection = db.collection("deliveries");
+reviewCollection = db.collection("reviews");
     console.log("MongoDB Connected!");
   } catch (err) {
     console.error("MongoDB Connection Error:", err);
   }
 }
 
-// Middleware: Verification
+// Middleware: Verification 
 const verifyToken = async (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith("Bearer ")) return res.status(401).json({ msg: "Unauthorized" });
-  const token = authHeader.split(" ")[1];
   try {
-    const { payload } = await jwtVerify(token, JWKS); 
-    req.user = payload;
+    await dbConnect();
+    
+    const cookieHeader = req.headers.cookie || "";
+    const sessionToken = cookieHeader.split('session_token=')
+                                    .pop()
+                                    .split('.')[0]
+                                    .replace('__Secure-better-auth', '');
+
+    console.log("DEBUG: Final Clean Token:", sessionToken);
+
+    const session = await client.db("biblio-drop_db").collection("session").findOne({ token: sessionToken });
+
+    if (!session) {
+      console.log("DEBUG: No session in DB for:", sessionToken);
+      return res.status(401).json({ msg: "Invalid Session" });
+    }
+
+    const user = await client.db("biblio-drop_db").collection("user").findOne({ _id: new ObjectId(session.userId) });
+
+    if (!user) {
+      return res.status(401).json({ msg: "User not found" });
+    }
+
+    req.user = { ...user, id: user._id.toString() };
     next();
-  } catch (error) {
-    res.status(401).json({ msg: "Unauthorized" }); 
+  } catch (err) {
+    console.error("Auth Error:", err);
+    res.status(500).json({ msg: "Server Error" });
   }
 };
-
-const librarianVerify = async (req, res, next) => {
-  if (req.user?.role !== "librarian") return res.status(403).json({ msg: "Forbidden" }); 
-  next();
-};
-
-// Routes
+// Base Route
 app.get('/', (req, res) => res.json({ message: 'Server is running!' }));
+
+
+// DASHBOARD SUMMARY API 
+app.get("/api/dashboard-stats", verifyToken, async (req, res) => {
+
+  await dbConnect();
+  try {
+   if (!req.user?._id) {
+  return res.status(401).json({ msg: "Unauthorized" });
+}
+
+let userId;
+
+try {
+  userId = new ObjectId(req.user._id);
+} catch (e) {
+  return res.status(400).json({ msg: "Invalid user id" });
+}
+    const userRole = (req.user.role || '').toLowerCase(); 
+    
+
+    let stats = {};
+
+    if (userRole === 'admin') {
+      const revenue = await paymentCollection.aggregate([{ $group: { _id: null, total: { $sum: "$amount" } } }]).toArray();
+      stats = {
+        totalUsers: await userCollection.countDocuments(),
+        totalBooks: await booksCollection.countDocuments(),
+        pendingBooks: await booksCollection.countDocuments({ status: "Pending" }),
+        totalRevenue: revenue[0]?.total || 0
+      };
+    } else if (userRole === 'librarian') {
+      const query = { userId: new ObjectId(req.user._id) };
+
+      stats = {
+        myBooks: await booksCollection.countDocuments(query),
+        pendingRequests: await booksCollection.countDocuments({ ...query, status: "Pending" }),
+        totalEarnings: 0
+      };
+    } else {
+      const spent = await paymentCollection.aggregate([{ $match: { userId: userId } }, { $group: { _id: null, total: { $sum: "$amount" } } }]).toArray();
+      stats = {
+        totalBorrowed: await booksCollection.countDocuments({ borrowerId: userId }),
+        totalSpent: spent[0]?.total || 0
+      };
+    }
+    res.json(stats);
+  } catch (e) { 
+    console.error("Dashboard Stats Error:", e);
+    res.status(500).json({ error: "Server Error" }); 
+  }
+});
+
+// GET DELIVERY HISTORY API
+app.get("/api/user/delivery-history", verifyToken, async (req, res) => {
+  await dbConnect();
+
+  try {
+    const history = await deliveryCollection
+      .find({
+        userId: new ObjectId(req.user._id),
+      })
+      .sort({
+        requestedAt: -1,
+      })
+      .toArray();
+
+    res.json(history);
+  } catch (err) {
+    console.error(err);
+
+    res.status(500).json({
+      error: "Server Error",
+    });
+  }
+});
+
+
+app.get("/api/user/summary", verifyToken, async (req, res) => {
+  await dbConnect();
+  try {
+    const userId = req.user._id.toString();
+
+    const currentlyReading = await booksCollection.countDocuments({ borrowerId: userId, status: "Borrowed" });
+    const totalBorrowed = await booksCollection.countDocuments({ borrowerId: userId });
+    const wishlistCount = req.user.wishlist ? req.user.wishlist.length : 0; 
+
+    res.json({ currentlyReading, totalBorrowed, wishlistCount });
+  } catch (e) {
+    res.status(500).json({ error: "Failed to fetch summary" });
+  }
+});
+//  SUBSCRIPTION & PAYMENT API
 
 app.post("/subscription", verifyToken, async (req, res) => {
   await dbConnect();
@@ -80,13 +202,811 @@ app.post("/subscription", verifyToken, async (req, res) => {
   } catch (e) { res.status(500).json({ error: "Server Error" }); }
 });
 
+
+const isAdmin = (req, res, next) => {
+  if (req.user && req.user.role === 'admin') {
+    next();
+  } else {
+    console.log("Access Denied for user:", req.user?.email);
+    return res.status(403).json({ msg: "Forbidden: Admins only" });
+  }
+};
+
+app.get("/api/admin/stats", verifyToken, isAdmin, async (req, res) => {
+  await dbConnect();
+  try {
+    const stats = {
+      totalUsers: await userCollection.countDocuments(),
+      totalBooks: await booksCollection.countDocuments(),
+      pendingBooks: await booksCollection.countDocuments({ status: "Pending" }),
+      totalRevenue: (await paymentCollection.aggregate([{ 
+        $group: { _id: null, total: { $sum: "$amount" } } 
+      }]).toArray())[0]?.total || 0
+    };
+    res.json(stats);
+  } catch (e) { 
+    console.error("Admin Stats Error:", e);
+    res.status(500).json({ error: "Server Error" }); 
+  }
+});
+
+app.patch("/api/admin/books/approve/:id", verifyToken, isAdmin, async (req, res) => {
+  await dbConnect();
+
+  try {
+    const result = await booksCollection.updateOne(
+      { _id: new ObjectId(req.params.id) },
+      {
+        $set: {
+  status: "Approved",
+  approvedAt: new Date()
+}
+      }
+    );
+
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+
+app.get("/api/admin/users", verifyToken, isAdmin, async (req, res) => {
+  await dbConnect();
+
+  try {
+    const users = await userCollection.find().toArray();
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+
+//  BOOKS API
+
 app.get("/books", async (req, res) => {
   await dbConnect();
-  const result = await booksCollection.find().toArray();
+
+  try {
+    const {
+      search = "",
+      category,
+      availability,
+      minFee,
+      maxFee,
+      page = 1,
+      limit = 6,
+    } = req.query;
+
+    const query = {
+      status: "Published",
+    };
+
+    // Search by title
+    if (search) {
+      query.title = {
+        $regex: search,
+        $options: "i",
+      };
+    }
+
+    // Category Filter
+    if (category && category !== "All") {
+      query.category = category;
+    }
+
+    // Availability Filter
+    if (availability && availability !== "All") {
+      query.availability = availability;
+    }
+
+    // Delivery Fee Filter
+    if (minFee || maxFee) {
+      query.deliveryFee = {};
+
+      if (minFee) {
+        query.deliveryFee.$gte = Number(minFee);
+      }
+
+      if (maxFee) {
+        query.deliveryFee.$lte = Number(maxFee);
+      }
+    }
+
+    const currentPage = Number(page);
+    const perPage = Number(limit);
+
+    const totalBooks = await booksCollection.countDocuments(query);
+
+    const books = await booksCollection
+      .find(query)
+      .skip((currentPage - 1) * perPage)
+      .limit(perPage)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json({
+      books,
+      totalBooks,
+      currentPage,
+      totalPages: Math.ceil(totalBooks / perPage),
+    });
+  } catch (error) {
+    console.log(error);
+    res.status(500).json({
+      error: "Server Error",
+    });
+  }
+});
+
+
+app.get("/books/:id", async (req, res) => {
+  await dbConnect();
+  try {
+    const { id } = req.params;
+    
+    const result = await booksCollection.findOne({ _id: new ObjectId(id) });
+    
+    if (!result) {
+      return res.status(404).json({ error: "Book not found" });
+    }
+    
+    res.json(result);
+  } catch (error) { 
+    console.error("Error in GET /books/:id", error);
+    res.status(500).json({ error: "Server Error" }); 
+  }
+});
+
+app.post("/api/books", verifyToken, async (req, res) => {
+  await dbConnect();
+  try {
+    const bookData = req.body;
+    const newBook = {
+      ...bookData,
+      userId: new ObjectId(req.user._id),
+      status: "Pending", 
+      createdAt: new Date()
+    };
+    const result = await booksCollection.insertOne(newBook);
+    res.status(201).json(result);
+  } catch (e) { res.status(500).json({ error: "Server Error" }); }
+});
+
+
+
+app.patch("/books/:id",verifyToken, async (req, res) => {
+  const { id } = req.params;
+  const updatedData = req.body;
+
+  try {
+    const result = await booksCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updatedData }
+    );
+    
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: "Book not found" });
+    }
+    
+    res.json({ message: "Book updated successfully!", result });
+  } catch (error) {
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+
+app.delete("/books/:id",verifyToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await booksCollection.deleteOne({ _id: new ObjectId(id) });
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ error: "Book not found" });
+    }
+    res.json({ message: "Book deleted successfully!" });
+  } catch (error) {
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+// ADMIN MANAGE USERS API
+
+app.get("/api/users", verifyToken, async (req, res) => {
+  await dbConnect();
+  try {
+    const users = await userCollection.find().toArray();
+    res.json(users);
+  } catch (e) { res.status(500).json({ error: "Server Error" }); }
+});
+
+app.patch("/api/users/:id", verifyToken, async (req, res) => {
+  await dbConnect();
+  try {
+    const { id } = req.params;
+    const { role } = req.body;
+    const result = await userCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { role } }
+    );
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: "Server Error" }); }
+});
+
+app.delete("/api/users/:id", verifyToken, async (req, res) => {
+  await dbConnect();
+  try {
+    const { id } = req.params;
+    const result = await userCollection.deleteOne({ _id: new ObjectId(id) });
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: "Server Error" }); }
+});
+
+
+
+app.get("/api/librarian/books", verifyToken, async (req, res) => {
+  try {
+    const page = Number(req.query.page) || 1;
+    const limit = Number(req.query.limit) || 6;
+    const search = req.query.search || "";
+
+    // ইউজার আইডি দিয়ে কোয়েরি
+    const query = { userId: req.user.id };
+
+    if (search) {
+      query.title = { $regex: search, $options: "i" };
+    }
+
+    const totalBooks = await booksCollection.countDocuments(query);
+    const books = await booksCollection
+      .find(query)
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json({
+      books,
+      currentPage: page,
+      totalPages: Math.ceil(totalBooks / limit),
+      totalBooks,
+    });
+  } catch (e) {
+    console.error("API Error:", e);
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+
+app.post("/api/deliveries", verifyToken, async (req, res) => {
+  await dbConnect();
+
+  try {
+    const { bookId } = req.body;
+
+    const book = await booksCollection.findOne({
+      _id: new ObjectId(bookId),
+    });
+
+    if (!book) {
+      return res.status(404).json({
+        success: false,
+        message: "Book not found",
+      });
+    }
+
+    if (String(book.userId) === String(req.user._id)) {
+      return res.status(400).json({
+        success: false,
+        message: "You can't request your own book.",
+      });
+    }
+
+    if (book.status !== "Published") {
+      return res.status(400).json({
+        success: false,
+        message: "Book unavailable.",
+      });
+    }
+
+    const exists = await deliveryCollection.findOne({
+      bookId: new ObjectId(bookId),
+      userId: new ObjectId(req.user._id),
+    });
+
+    if (exists) {
+      return res.status(400).json({
+        success: false,
+        message: "Already requested.",
+      });
+    }
+
+    const delivery = {
+      bookId: new ObjectId(bookId),
+      userId: new ObjectId(req.user._id),
+      librarianId: new ObjectId(book.userId),
+      title: book.title,
+      deliveryFee: book.deliveryFee || 0,
+      status: "Pending",
+      requestedAt: new Date(),
+    };
+
+    await deliveryCollection.insertOne(delivery);
+
+    res.json({
+      success: true,
+      message: "Delivery requested successfully.",
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      success: false,
+      message: "Server Error",
+    });
+  }
+});
+
+
+
+app.get("/api/librarian/deliveries", verifyToken, async (req, res) => {
+  await dbConnect();
+
+  try {
+    const deliveries = await deliveryCollection
+      .aggregate([
+        {
+          $match: {
+            librarianId: new ObjectId(req.user._id),
+          },
+        },
+        {
+          $lookup: {
+            from: "user",
+            localField: "userId",
+            foreignField: "_id",
+            as: "user",
+          },
+        },
+        {
+          $unwind: "$user",
+        },
+        {
+          $sort: {
+            requestedAt: -1,
+          },
+        },
+      ])
+      .toArray();
+
+    res.json(deliveries);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      error: "Server Error",
+    });
+  }
+});
+
+
+
+app.patch("/api/librarian/deliveries/:id", verifyToken, async (req, res) => {
+  await dbConnect();
+
+  try {
+    const { status } = req.body;
+
+    await deliveryCollection.updateOne(
+      {
+        _id: new ObjectId(req.params.id),
+      },
+      {
+        $set: {
+          status,
+        },
+      }
+    );
+
+    res.json({
+      success: true,
+    });
+  } catch (err) {
+    console.error(err);
+
+    res.status(500).json({
+      success: false,
+    });
+  }
+});
+
+
+app.patch("/api/librarian/books/unpublish/:id", verifyToken, async (req, res) => {
+  await dbConnect();
+
+  try {
+    const { id } = req.params;
+
+    const result = await booksCollection.updateOne(
+      {
+        _id: new ObjectId(id),
+        userId: new ObjectId(req.user._id),
+        status: "Published",
+      },
+      {
+        $set: {
+          status: "Unpublished",
+        },
+      }
+    );
+
+    if (result.modifiedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Book not found or already unpublished",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Book unpublished successfully",
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({
+      success: false,
+      message: "Server Error",
+    });
+  }
+});
+
+
+app.post("/api/reviews", verifyToken, async (req, res) => {
+  await dbConnect();
+
+  try {
+    const { bookId, rating, comment } = req.body;
+
+    //  Validate input
+    if (!bookId || !rating || !comment) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing required fields",
+      });
+    }
+
+    //  1. CHECK DELIVERY STATUS (MAIN REQUIREMENT)
+    const delivery = await deliveryCollection.findOne({
+      userId: new ObjectId(req.user._id),
+      bookId: new ObjectId(bookId),
+      status: "Delivered",
+    });
+
+    
+
+    if (!delivery) {
+      return res.status(403).json({
+        success: false,
+        message: "You can only review delivered books",
+      });
+    }
+ 
+    const review = {
+      bookId: new ObjectId(bookId),
+      userId: new ObjectId(req.user._id),
+      userName: req.user.name || "Anonymous",
+      rating: Number(rating),
+      comment,
+      createdAt: new Date(),
+    };
+
+    await reviewCollection.insertOne(review);
+
+    res.status(201).json({
+      success: true,
+      message: "Review added successfully",
+    });
+  } catch (err) {
+    console.error("Review Error:", err);
+
+    res.status(500).json({
+      success: false,
+      message: "Server Error",
+    });
+  }
+});
+
+app.get("/api/reviews/:bookId", async (req, res) => {
+  await dbConnect();
+
+  try {
+    const reviews = await reviewCollection
+      .find({
+        bookId: new ObjectId(req.params.bookId),
+      })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json(reviews);
+  } catch (err) {
+    console.error("Fetch Review Error:", err);
+
+    res.status(500).json({
+      error: "Server Error",
+    });
+  }
+});
+
+
+app.get("/api/user/borrowed-books", verifyToken, async (req, res) => {
+  await dbConnect();
+  
+
+  try {
+    const userId = new ObjectId(req.user._id);
+
+    const books = await booksCollection
+      .find({ borrowerId: userId })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json(books);
+  } catch (err) {
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+app.post("/api/books/borrow/:bookId", verifyToken, async (req, res) => {
+  await dbConnect();
+
+  try {
+    const { bookId } = req.params;
+
+    const result = await booksCollection.updateOne(
+      { _id: new ObjectId(bookId) },
+      {
+        $set: {
+          borrowerId: new ObjectId(req.user._id),
+          status: "Borrowed"
+        }
+      }
+    );
+
+    res.json({
+      success: true,
+      message: "Book borrowed successfully"
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+
+app.get("/api/admin/overview", verifyToken, isAdmin, async (req, res) => {
+  await dbConnect();
+
+  try {
+    const totalUsers = await userCollection.countDocuments();
+    const totalBooks = await booksCollection.countDocuments();
+    const pendingBooks = await booksCollection.countDocuments({ status: "Pending" });
+
+    const revenueAgg = await paymentCollection.aggregate([
+      { $group: { _id: null, total: { $sum: "$amount" } } }
+    ]).toArray();
+
+    res.json({
+      totalUsers,
+      totalBooks,
+      pendingBooks,
+      totalRevenue: revenueAgg[0]?.total || 0
+    });
+
+  } catch (err) {
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+app.get("/api/admin/users", verifyToken, isAdmin, async (req, res) => {
+  await dbConnect();
+
+  const users = await userCollection.find().toArray();
+  res.json(users);
+});
+
+app.patch("/api/admin/users/:id", verifyToken, isAdmin, async (req, res) => {
+  await dbConnect();
+
+  const { role } = req.body;
+
+  const result = await userCollection.updateOne(
+    { _id: new ObjectId(req.params.id) },
+    { $set: { role } }
+  );
+
   res.json(result);
 });
 
-// 
+app.delete("/api/admin/users/:id", verifyToken, isAdmin, async (req, res) => {
+  await dbConnect();
+
+  await userCollection.deleteOne({
+    _id: new ObjectId(req.params.id),
+  });
+
+  res.json({ success: true });
+});
+
+app.get("/api/admin/books", verifyToken, isAdmin, async (req, res) => {
+  await dbConnect();
+
+  try {
+    const books = await booksCollection
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    console.log("BOOKS COUNT:", books.length); // 🔥 debug
+
+    res.json(books);
+  } catch (err) {
+    console.log(err);
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+app.patch("/api/admin/books/approve/:id", verifyToken, isAdmin, async (req, res) => {
+  await dbConnect();
+
+  await booksCollection.updateOne(
+    { _id: new ObjectId(req.params.id) },
+    { $set: { status: "Published" } }
+  );
+
+  res.json({ success: true });
+});
+
+app.patch("/api/admin/books/reject/:id", verifyToken, isAdmin, async (req, res) => {
+  await dbConnect();
+
+  await booksCollection.updateOne(
+    { _id: new ObjectId(req.params.id) },
+    { $set: { status: "Rejected" } }
+  );
+
+  res.json({ success: true });
+});
+
+
+app.delete("/api/admin/books/:id", verifyToken, isAdmin, async (req, res) => {
+  await dbConnect();
+
+  await booksCollection.deleteOne({
+    _id: new ObjectId(req.params.id),
+  });
+
+  res.json({ success: true });
+});
+
+app.get("/api/admin/transactions", verifyToken, isAdmin, async (req, res) => {
+  await dbConnect();
+
+  const transactions = await paymentCollection
+    .find()
+    .sort({ createdAt: -1 })
+    .toArray();
+
+  res.json(transactions);
+});
+
+
+
+app.get("/api/librarian/overview", verifyToken, async (req, res) => {
+  await dbConnect();
+
+  try {
+    const librarianId = new ObjectId(req.user._id);
+
+    const myBooks = await booksCollection.countDocuments({
+      userId: librarianId,
+    });
+
+    const publishedBooks = await booksCollection.countDocuments({
+      userId: librarianId,
+      status: "Published",
+    });
+
+    const pendingBooks = await booksCollection.countDocuments({
+      userId: librarianId,
+      status: "Pending",
+    });
+
+    const totalRequests = await deliveryCollection.countDocuments({
+      librarianId,
+    });
+
+    res.json({
+      myBooks,
+      publishedBooks,
+      pendingBooks,
+      totalRequests,
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Server Error",
+    });
+  }
+});
+
+
+app.get("/api/librarian/transactions", verifyToken, async (req, res) => {
+  await dbConnect();
+
+  try {
+    const librarianId = new ObjectId(req.user._id);
+
+    const transactions = await deliveryCollection
+      .find({
+        librarianId,
+        status: "Delivered",
+      })
+      .sort({
+        requestedAt: -1,
+      })
+      .toArray();
+
+    res.json(transactions);
+  } catch (err) {
+    res.status(500).json({
+      error: "Server Error",
+    });
+  }
+});
+
+
+
+app.get("/api/librarian/chart", verifyToken, async (req, res) => {
+  await dbConnect();
+
+  try {
+    const librarianId = new ObjectId(req.user._id);
+
+    const pending = await booksCollection.countDocuments({
+      userId: librarianId,
+      status: "Pending",
+    });
+
+    const published = await booksCollection.countDocuments({
+      userId: librarianId,
+      status: "Published",
+    });
+
+    const unpublished = await booksCollection.countDocuments({
+      userId: librarianId,
+      status: "Unpublished",
+    });
+
+    res.json([
+      { name: "Pending", value: pending },
+      { name: "Published", value: published },
+      { name: "Unpublished", value: unpublished },
+    ]);
+  } catch (err) {
+    res.status(500).json({
+      error: "Server Error",
+    });
+  }
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Export for Vercel
 module.exports = app;
