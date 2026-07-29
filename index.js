@@ -87,7 +87,7 @@ app.use(async (req, res, next) => {
 });
 
 // ==========================================
-// 🔐 AUTH & GATEKEEPER MIDDLEWARES
+// 🔐 AUTH & GATEKEEPER MIDDLEWARES (FIXED FOR VERCEL)
 // ==========================================
 const verifyToken = async (req, res, next) => {
   try {
@@ -98,7 +98,9 @@ const verifyToken = async (req, res, next) => {
 
     if (!rawToken && req.headers.cookie) {
       const cookies = req.headers.cookie.split(';').reduce((acc, cookie) => {
-        const [key, value] = cookie.trim().split('=');
+        const parts = cookie.trim().split('=');
+        const key = parts[0];
+        const value = parts.slice(1).join('=');
         acc[key] = value ? value.trim() : '';
         return acc;
       }, {});
@@ -109,18 +111,23 @@ const verifyToken = async (req, res, next) => {
       return res.status(401).json({ msg: "No token found" });
     }
 
-    const sessionToken = rawToken.split('.')[0]; 
-    const session = await sessionCollection.findOne({ token: sessionToken });
+    const sessionToken = rawToken.includes('.') ? rawToken.split('.')[0] : rawToken; 
+    let session = await sessionCollection.findOne({ token: sessionToken });
+
+    if (!session) {
+      session = await sessionCollection.findOne({ token: rawToken });
+    }
 
     if (!session) {
       return res.status(401).json({ msg: "Invalid Session" });
     }
 
-    if (!ObjectId.isValid(session.userId)) {
+    const userIdVal = session.userId || session.user?.id;
+    if (!userIdVal || !ObjectId.isValid(userIdVal)) {
       return res.status(401).json({ msg: "Invalid User ID format" });
     }
 
-    const user = await userCollection.findOne({ _id: new ObjectId(session.userId) });
+    const user = await userCollection.findOne({ _id: new ObjectId(userIdVal) });
     if (!user) {
       return res.status(401).json({ msg: "User not found" });
     }
@@ -536,7 +543,6 @@ app.patch("/api/librarian/deliveries/:id", verifyToken, async (req, res) => {
 // 👤 USER DASHBOARD & REVIEWS API
 // ==========================================
 
-// 📌 FIXED: USER SUMMARY OVERVIEW (Safe ObjectId Handling)
 app.get("/api/user/summary", verifyToken, async (req, res) => {
   try {
     const userIdStr = req.user.id || req.user._id;
