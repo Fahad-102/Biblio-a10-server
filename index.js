@@ -693,7 +693,7 @@ app.get("/api/reviews/:bookId", async (req, res) => {
 // 👑 ADMIN DASHBOARD API
 // ==========================================
 
-app.get("/api/admin/overview", verifyToken, isAdmin, async (req, res) => {
+app.get("/api/admin/chart", verifyToken, isAdmin, async (req, res) => {
   try {
     const totalUsers = await userCollection.countDocuments();
     const totalBooks = await booksCollection.countDocuments();
