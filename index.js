@@ -119,34 +119,42 @@ const verifyToken = async (req, res, next) => {
       return res.status(401).json({ msg: "No token found" });
     }
 
-    // BetterAuth টোকেন হ্যান্ডেলিং
     const sessionToken = rawToken.includes('.') ? rawToken.split('.')[0] : rawToken; 
-    let session = await sessionCollection.findOne({ token: sessionToken });
 
-    if (!session) {
-      session = await sessionCollection.findOne({ token: rawToken });
-    }
-
-    // অতিরিক্ত বিকল্প: যদি কুッキー ভ্যালুটি সেশন আইডি বা অন্য কিছু হয়
-    if (!session) {
-      session = await sessionCollection.findOne({ id: rawToken });
-    }
+    // BetterAuth সেশন খোঁজার জন্য বহুমুখী কোয়েরি (Token, ID, অথবা SessionToken)
+    let session = await sessionCollection.findOne({
+      $or: [
+        { token: sessionToken },
+        { token: rawToken },
+        { id: sessionToken },
+        { id: rawToken },
+        { sessionToken: sessionToken },
+        { sessionToken: rawToken }
+      ]
+    });
 
     if (!session) {
       return res.status(401).json({ msg: "Invalid Session" });
     }
 
     const userIdVal = session.userId || session.user?.id;
-    if (!userIdVal || !ObjectId.isValid(userIdVal)) {
+    if (!userIdVal) {
       return res.status(401).json({ msg: "Invalid User ID format" });
     }
 
-    const user = await userCollection.findOne({ _id: new ObjectId(userIdVal) });
+    let userQuery;
+    if (ObjectId.isValid(userIdVal)) {
+      userQuery = { _id: new ObjectId(userIdVal) };
+    } else {
+      userQuery = { id: userIdVal };
+    }
+
+    const user = await userCollection.findOne(userQuery);
     if (!user) {
       return res.status(401).json({ msg: "User not found" });
     }
 
-    req.user = { ...user, id: user._id.toString(), role: user.role || 'user' };
+    req.user = { ...user, id: user._id ? user._id.toString() : user.id, role: user.role || 'user' };
     next();
   } catch (err) {
     console.error("verifyToken error:", err);
