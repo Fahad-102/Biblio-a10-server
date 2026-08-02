@@ -87,7 +87,7 @@ app.use(async (req, res, next) => {
 });
 
 // ==========================================
-// 🔐 AUTH & GATEKEEPER MIDDLEWARES (FIXED FOR VERCEL)
+// 🔐 AUTH & GATEKEEPER MIDDLEWARES
 // ==========================================
 const verifyToken = async (req, res, next) => {
   try {
@@ -96,6 +96,7 @@ const verifyToken = async (req, res, next) => {
                    req.cookies['__Secure-better-auth.session_token'] || 
                    req.cookies['better-auth.session_token'];
 
+    // যদি কুッキー হেডার স্ট্রিং থেকে ম্যানুয়ালি পার্স করতে হয়
     if (!rawToken && req.headers.cookie) {
       const cookies = req.headers.cookie.split(';').reduce((acc, cookie) => {
         const parts = cookie.trim().split('=');
@@ -111,11 +112,17 @@ const verifyToken = async (req, res, next) => {
       return res.status(401).json({ msg: "No token found" });
     }
 
+    // BetterAuth টোকেন হ্যান্ডেলিং
     const sessionToken = rawToken.includes('.') ? rawToken.split('.')[0] : rawToken; 
     let session = await sessionCollection.findOne({ token: sessionToken });
 
     if (!session) {
       session = await sessionCollection.findOne({ token: rawToken });
+    }
+
+    // অতিরিক্ত বিকল্প: যদি কুッキー ভ্যালুটি সেশন আইডি বা অন্য কিছু হয়
+    if (!session) {
+      session = await sessionCollection.findOne({ id: rawToken });
     }
 
     if (!session) {
@@ -132,7 +139,7 @@ const verifyToken = async (req, res, next) => {
       return res.status(401).json({ msg: "User not found" });
     }
 
-    req.user = { ...user, id: user._id.toString() };
+    req.user = { ...user, id: user._id.toString(), role: user.role || 'user' };
     next();
   } catch (err) {
     console.error("verifyToken error:", err);
@@ -140,16 +147,19 @@ const verifyToken = async (req, res, next) => {
   }
 };
 
-const isAdmin = (req, res, next) => {
-  const userRole = (req.user?.role || '').toLowerCase();
-  if (userRole === 'admin') {
+// 🛡️ ADMIN GATEKEEPER MIDDLEWARE (Added)
+const isAdmin = async (req, res, next) => {
+  try {
+    const userRole = (req.user?.role || '').toLowerCase();
+    if (userRole !== 'admin') {
+      return res.status(403).json({ error: "Access Denied. Admins only." });
+    }
     next();
-  } else {
-    return res.status(403).json({ msg: "Forbidden: Admins only" });
+  } catch (err) {
+    console.error("isAdmin error:", err);
+    res.status(500).json({ error: "Server Error" });
   }
 };
-
-app.get('/', (req, res) => res.json({ message: 'BiblioDrop Server is running!' }));
 
 // ==========================================
 // 💳 STRIPE PAYMENTS
