@@ -87,6 +87,13 @@ app.use(async (req, res, next) => {
 });
 
 // ==========================================
+// 🏠 ROOT ROUTE
+// ==========================================
+app.get("/", (req, res) => {
+  res.send("Biblio Drop Server is running successfully!");
+});
+
+// ==========================================
 // 🔐 AUTH & GATEKEEPER MIDDLEWARES
 // ==========================================
 const verifyToken = async (req, res, next) => {
@@ -147,7 +154,7 @@ const verifyToken = async (req, res, next) => {
   }
 };
 
-// 🛡️ ADMIN GATEKEEPER MIDDLEWARE (Added)
+// 🛡️ ADMIN GATEKEEPER MIDDLEWARE
 const isAdmin = async (req, res, next) => {
   try {
     const userRole = (req.user?.role || '').toLowerCase();
