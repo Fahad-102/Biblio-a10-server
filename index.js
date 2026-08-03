@@ -38,7 +38,7 @@ app.use(cookieParser());
 app.use(express.json());
 
 // ==========================================
-// 🔐 BETTER AUTH API ROUTE HANDLER (MUST BE HERE)
+// 🔐 BETTER AUTH API ROUTE HANDLER
 // ==========================================
 app.all("/api/auth/*", async (req, res) => {
   return toNodeHandler(auth)(req, res);
@@ -51,17 +51,9 @@ const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
 let cachedClient = null;
 let cachedDb = null;
 
-let subscriptionCollection,
-    userCollection,
-    booksCollection,
-    paymentCollection,
-    deliveryCollection,
-    reviewCollection,
-    sessionCollection;
-
 async function dbConnect() {
   if (cachedClient && cachedDb) {
-    return { client: cachedClient, db: cachedDb };
+    return cachedDb;
   }
 
   const client = new MongoClient(uri, {
@@ -75,37 +67,24 @@ async function dbConnect() {
   await client.connect();
   const db = client.db("biblio-drop_db");
 
-  subscriptionCollection = db.collection("subscription");
-  userCollection = db.collection("user");
-  booksCollection = db.collection("books");
-  paymentCollection = db.collection("payment");
-  deliveryCollection = db.collection("deliveries");
-  reviewCollection = db.collection("reviews");
-  sessionCollection = db.collection("session");
-
-  try {
-    await sessionCollection.createIndex({ token: 1 });
-    await booksCollection.createIndex({ userId: 1, createdAt: -1 });
-    await booksCollection.createIndex({ status: 1 });
-  } catch (idxErr) {
-    console.warn("Index warning:", idxErr.message);
-  }
-
   cachedClient = client;
   cachedDb = db;
-  return { client, db };
+  return db;
 }
 
-// Global DB Middleware for other APIs
-app.use(async (req, res, next) => {
-  try {
-    await dbConnect();
-    next();
-  } catch (err) {
-    console.error("MongoDB Connection Error:", err);
-    res.status(500).json({ error: "Database Connection Error" });
-  }
-});
+// Helper to get collections safely
+async function getCollections() {
+  const db = await dbConnect();
+  return {
+    subscriptionCollection: db.collection("subscription"),
+    userCollection: db.collection("user"),
+    booksCollection: db.collection("books"),
+    paymentCollection: db.collection("payment"),
+    deliveryCollection: db.collection("deliveries"),
+    reviewCollection: db.collection("reviews"),
+    sessionCollection: db.collection("session")
+  };
+}
 
 // ==========================================
 // 🏠 ROOT ROUTE & ROLE CHECK API
@@ -119,6 +98,7 @@ app.get("/api/user-role", async (req, res) => {
     const { email } = req.query;
     if (!email) return res.status(400).json({ error: "Email is required" });
 
+    const { userCollection } = await getCollections();
     const dbUser = await userCollection.findOne({ email });
     if (!dbUser) return res.status(404).json({ error: "User not found in database" });
 
@@ -137,6 +117,7 @@ app.post("/api/create-checkout-session", async (req, res) => {
     const { bookId, userId, userEmail } = req.body;
     if (!ObjectId.isValid(bookId)) return res.status(400).json({ error: "Invalid Book ID" });
 
+    const { booksCollection } = await getCollections();
     const book = await booksCollection.findOne({ _id: new ObjectId(bookId) });
     if (!book) return res.status(404).json({ error: "Book not found" });
 
@@ -187,6 +168,7 @@ app.post("/api/payments/confirm", async (req, res) => {
 
     if (session.payment_status === 'paid') {
       const { userId, userEmail, bookId, librarianId, bookTitle, deliveryFee } = session.metadata || {};
+      const { paymentCollection, deliveryCollection } = await getCollections();
 
       const existingPayment = await paymentCollection.findOne({ transactionId: session.payment_intent });
       if (existingPayment) {
@@ -229,6 +211,7 @@ app.post("/api/payments/confirm", async (req, res) => {
 app.get("/books", async (req, res) => {
   try {
     const { search = "", category, availability, minFee, maxFee, page = 1, limit = 6 } = req.query;
+    const { booksCollection } = await getCollections();
 
     const query = { 
       status: { $in: ["Approved", "Published", "approved", "published"] } 
@@ -272,6 +255,7 @@ app.get("/books/:id", async (req, res) => {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid ID" });
 
+    const { booksCollection } = await getCollections();
     const result = await booksCollection.findOne({ _id: new ObjectId(id) });
     if (!result) return res.status(404).json({ error: "Book not found" });
 
@@ -286,6 +270,8 @@ app.get("/books/:id", async (req, res) => {
 // ==========================================
 app.get("/api/librarian/stats", async (req, res) => {
   try {
+    const { booksCollection, deliveryCollection } = await getCollections();
+
     const myBooks = await booksCollection.countDocuments();
     const approvedBooks = await booksCollection.countDocuments({ 
       status: { $in: ["Approved", "Published", "approved", "published"] } 
@@ -317,6 +303,8 @@ app.get("/api/librarian/stats", async (req, res) => {
 app.post("/api/books", async (req, res) => {
   try {
     const bookData = req.body;
+    const { booksCollection } = await getCollections();
+
     const newBook = {
       ...bookData,
       status: bookData.status || "Approved", 
@@ -337,6 +325,7 @@ app.get("/api/librarian/books", async (req, res) => {
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.max(1, Number(req.query.limit) || 10);
     const search = req.query.search || "";
+    const { booksCollection } = await getCollections();
 
     const query = {};
     if (search) query.title = { $regex: search, $options: "i" };
@@ -369,6 +358,7 @@ app.patch("/api/librarian/books/:id", async (req, res) => {
     const updateData = { ...req.body };
     delete updateData._id;
 
+    const { booksCollection } = await getCollections();
     await booksCollection.updateOne(
       { _id: new ObjectId(id) },
       { $set: { ...updateData, updatedAt: new Date() } }
@@ -385,6 +375,7 @@ app.delete("/api/librarian/books/:id", async (req, res) => {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ success: false, message: "Invalid ID" });
 
+    const { booksCollection } = await getCollections();
     await booksCollection.deleteOne({ _id: new ObjectId(id) });
     res.json({ success: true, message: "Book deleted successfully" });
   } catch (error) {
@@ -397,6 +388,7 @@ app.patch("/api/librarian/books/unpublish/:id", async (req, res) => {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ success: false, message: "Invalid ID" });
 
+    const { booksCollection } = await getCollections();
     await booksCollection.updateOne(
       { _id: new ObjectId(id) },
       { $set: { status: "Unpublished", isApproved: false } }
@@ -409,6 +401,7 @@ app.patch("/api/librarian/books/unpublish/:id", async (req, res) => {
 
 app.get("/api/librarian/deliveries", async (req, res) => {
   try {
+    const { deliveryCollection } = await getCollections();
     const deliveries = await deliveryCollection.find().sort({ requestedAt: -1 }).toArray();
     res.json(deliveries);
   } catch (err) {
@@ -422,6 +415,7 @@ app.patch("/api/librarian/deliveries/:id", async (req, res) => {
     if (!ObjectId.isValid(id)) return res.status(400).json({ success: false, message: "Invalid ID" });
 
     const { status } = req.body;
+    const { deliveryCollection } = await getCollections();
     await deliveryCollection.updateOne({ _id: new ObjectId(id) }, { $set: { status } });
     res.json({ success: true });
   } catch (err) {
@@ -434,6 +428,8 @@ app.patch("/api/librarian/deliveries/:id", async (req, res) => {
 // ==========================================
 app.get("/api/user/summary", async (req, res) => {
   try {
+    const { deliveryCollection, paymentCollection, reviewCollection } = await getCollections();
+
     const totalOrders = await deliveryCollection.countDocuments();
     const pendingOrders = await deliveryCollection.countDocuments({ status: "Pending" });
     
@@ -457,6 +453,7 @@ app.get("/api/user/summary", async (req, res) => {
 
 app.get("/api/user/borrowed-books", async (req, res) => {
   try {
+    const { deliveryCollection } = await getCollections();
     const borrowedBooks = await deliveryCollection.find().sort({ requestedAt: -1 }).toArray();
     res.json(borrowedBooks);
   } catch (err) {
@@ -466,6 +463,7 @@ app.get("/api/user/borrowed-books", async (req, res) => {
 
 app.get("/api/user/delivery-history", async (req, res) => {
   try {
+    const { deliveryCollection } = await getCollections();
     const history = await deliveryCollection.find().sort({ requestedAt: -1 }).toArray();
     res.json(history);
   } catch (err) {
@@ -475,6 +473,7 @@ app.get("/api/user/delivery-history", async (req, res) => {
 
 app.get("/api/user/transactions", async (req, res) => {
   try {
+    const { paymentCollection } = await getCollections();
     const payments = await paymentCollection.find().sort({ createdAt: -1 }).toArray();
     res.json(payments);
   } catch (err) {
@@ -484,6 +483,7 @@ app.get("/api/user/transactions", async (req, res) => {
 
 app.get("/api/user/my-reviews", async (req, res) => {
   try {
+    const { reviewCollection } = await getCollections();
     const reviews = await reviewCollection.find().sort({ createdAt: -1 }).toArray();
     res.json(reviews);
   } catch (err) {
@@ -497,6 +497,8 @@ app.post("/api/reviews", async (req, res) => {
     if (!bookId || !rating || !comment || !ObjectId.isValid(bookId)) {
       return res.status(400).json({ success: false, message: "Missing or invalid required fields" });
     }
+
+    const { deliveryCollection, reviewCollection } = await getCollections();
 
     if (userEmail) {
       const deliveredCheck = await deliveryCollection.findOne({ userEmail, status: "Delivered" });
@@ -526,6 +528,7 @@ app.get("/api/reviews/:bookId", async (req, res) => {
     const { bookId } = req.params;
     if (!ObjectId.isValid(bookId)) return res.status(400).json({ error: "Invalid Book ID" });
     
+    const { reviewCollection } = await getCollections();
     const reviews = await reviewCollection.find({ bookId: new ObjectId(bookId) }).sort({ createdAt: -1 }).toArray();
     res.json(reviews);
   } catch (err) {
@@ -538,6 +541,8 @@ app.get("/api/reviews/:bookId", async (req, res) => {
 // ==========================================
 app.get("/api/admin/chart", async (req, res) => {
   try {
+    const { userCollection, booksCollection, paymentCollection } = await getCollections();
+
     const totalUsers = await userCollection.countDocuments();
     const totalBooks = await booksCollection.countDocuments();
     const pendingBooks = await booksCollection.countDocuments({ 
@@ -566,6 +571,7 @@ app.get("/api/admin/chart", async (req, res) => {
 
 app.get("/api/admin/books", async (req, res) => {
   try {
+    const { booksCollection } = await getCollections();
     const books = await booksCollection.find().sort({ createdAt: -1 }).toArray();
     res.json(books);
   } catch (err) {
@@ -578,6 +584,7 @@ app.patch("/api/admin/books/approve/:id", async (req, res) => {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid ID" });
 
+    const { booksCollection } = await getCollections();
     await booksCollection.updateOne(
       { _id: new ObjectId(id) },
       { $set: { status: "Approved", isApproved: true, approvedAt: new Date() } }
@@ -593,6 +600,7 @@ app.patch("/api/admin/books/reject/:id", async (req, res) => {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid ID" });
 
+    const { booksCollection } = await getCollections();
     await booksCollection.updateOne(
       { _id: new ObjectId(id) },
       { $set: { status: "Rejected", isApproved: false } }
@@ -608,6 +616,7 @@ app.delete("/api/admin/books/:id", async (req, res) => {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid ID" });
 
+    const { booksCollection } = await getCollections();
     await booksCollection.deleteOne({ _id: new ObjectId(id) });
     res.json({ success: true, message: "Book deleted" });
   } catch (err) {
@@ -617,6 +626,7 @@ app.delete("/api/admin/books/:id", async (req, res) => {
 
 app.get("/api/admin/users", async (req, res) => {
   try {
+    const { userCollection } = await getCollections();
     const users = await userCollection.find().toArray();
     res.json(users);
   } catch (err) {
@@ -630,6 +640,7 @@ app.patch("/api/admin/users/:id", async (req, res) => {
     if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid ID" });
 
     const { role } = req.body;
+    const { userCollection } = await getCollections();
     await userCollection.updateOne(
       { _id: new ObjectId(id) },
       { $set: { role } }
@@ -645,6 +656,7 @@ app.delete("/api/admin/users/:id", async (req, res) => {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid ID" });
 
+    const { userCollection } = await getCollections();
     await userCollection.deleteOne({ _id: new ObjectId(id) });
     res.json({ success: true });
   } catch (err) {
@@ -654,6 +666,7 @@ app.delete("/api/admin/users/:id", async (req, res) => {
 
 app.get("/api/admin/transactions", async (req, res) => {
   try {
+    const { paymentCollection } = await getCollections();
     const transactions = await paymentCollection.find().sort({ createdAt: -1 }).toArray();
     res.json(transactions);
   } catch (err) {
