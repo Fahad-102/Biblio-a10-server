@@ -94,90 +94,12 @@ app.get("/", (req, res) => {
 });
 
 // ==========================================
-// 🔐 AUTH & GATEKEEPER MIDDLEWARES
-// ==========================================
-const verifyToken = async (req, res, next) => {
-  try {
-    const authHeader = req.headers.authorization;
-    let rawToken = (authHeader && authHeader.split(" ")[1]) || 
-                   req.cookies['__Secure-better-auth.session_token'] || 
-                   req.cookies['better-auth.session_token'];
-
-    // যদি কুッキー হেডার স্ট্রিং থেকে ম্যানুয়ালি পার্স করতে হয়
-    if (!rawToken && req.headers.cookie) {
-      const cookies = req.headers.cookie.split(';').reduce((acc, cookie) => {
-        const parts = cookie.trim().split('=');
-        const key = parts[0];
-        const value = parts.slice(1).join('=');
-        acc[key] = value ? value.trim() : '';
-        return acc;
-      }, {});
-      rawToken = cookies['better-auth.session_token'] || cookies['__Secure-better-auth.session_token'];
-    }
-
-    if (!rawToken) {
-      return res.status(401).json({ msg: "No token found" });
-    }
-
-    // টোকেন ভাঙার সমস্যা এড়ানোর জন্য সরাসরি rawToken ব্যবহার করা হয়েছে
-    let session = await sessionCollection.findOne({
-      $or: [
-        { token: rawToken },
-        { sessionToken: rawToken },
-        { id: rawToken }
-      ]
-    });
-
-    if (!session) {
-      return res.status(401).json({ msg: "Invalid Session" });
-    }
-
-    const userIdVal = session.userId || session.user?.id;
-    if (!userIdVal) {
-      return res.status(401).json({ msg: "Invalid User ID format" });
-    }
-
-    let userQuery;
-    if (ObjectId.isValid(userIdVal)) {
-      userQuery = { _id: new ObjectId(userIdVal) };
-    } else {
-      userQuery = { id: userIdVal };
-    }
-
-    const user = await userCollection.findOne(userQuery);
-    if (!user) {
-      return res.status(401).json({ msg: "User not found" });
-    }
-
-    req.user = { ...user, id: user._id ? user._id.toString() : user.id, role: user.role || 'user' };
-    next();
-  } catch (err) {
-    console.error("verifyToken error:", err);
-    res.status(500).json({ msg: "Server Error" });
-  }
-};
-
-// 🛡️ ADMIN GATEKEEPER MIDDLEWARE
-const isAdmin = async (req, res, next) => {
-  try {
-    const userRole = (req.user?.role || '').toLowerCase();
-    if (userRole !== 'admin') {
-      return res.status(403).json({ error: "Access Denied. Admins only." });
-    }
-    next();
-  } catch (err) {
-    console.error("isAdmin error:", err);
-    res.status(500).json({ error: "Server Error" });
-  }
-};
-
-// ==========================================
-// 💳 STRIPE PAYMENTS
+// 💳 STRIPE PAYMENTS (Token Removed)
 // ==========================================
 
-app.post("/api/create-checkout-session", verifyToken, async (req, res) => {
+app.post("/api/create-checkout-session", async (req, res) => {
   try {
-    const { bookId } = req.body;
+    const { bookId, userId, userEmail } = req.body;
     if (!ObjectId.isValid(bookId)) return res.status(400).json({ error: "Invalid Book ID" });
 
     const book = await booksCollection.findOne({ _id: new ObjectId(bookId) });
@@ -205,8 +127,8 @@ app.post("/api/create-checkout-session", verifyToken, async (req, res) => {
       success_url: `${clientUrl}/dashboard/user?payment_success=true&bookId=${bookId}&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${clientUrl}/browse-books/${bookId}?canceled=true`,
       metadata: {
-        userId: req.user.id,
-        userEmail: req.user.email,
+        userId: userId || '',
+        userEmail: userEmail || '',
         bookId: book._id.toString(),
         librarianId: book.userId ? book.userId.toString() : '',
         bookTitle: book.title,
@@ -221,7 +143,7 @@ app.post("/api/create-checkout-session", verifyToken, async (req, res) => {
   }
 });
 
-app.post("/api/payments/confirm", verifyToken, async (req, res) => {
+app.post("/api/payments/confirm", async (req, res) => {
   try {
     const { sessionId } = req.body;
     if (!sessionId) return res.status(400).json({ error: "Missing sessionId" });
@@ -238,7 +160,7 @@ app.post("/api/payments/confirm", verifyToken, async (req, res) => {
 
       await paymentCollection.insertOne({
         transactionId: session.payment_intent,
-        userId: new ObjectId(userId),
+        userId: userId && ObjectId.isValid(userId) ? new ObjectId(userId) : userId,
         userEmail,
         amount: Number(deliveryFee),
         date: new Date(),
@@ -247,7 +169,7 @@ app.post("/api/payments/confirm", verifyToken, async (req, res) => {
 
       await deliveryCollection.insertOne({
         bookId: new ObjectId(bookId),
-        userId: new ObjectId(userId),
+        userId: userId && ObjectId.isValid(userId) ? new ObjectId(userId) : userId,
         userEmail,
         librarianId: librarianId ? (ObjectId.isValid(librarianId) ? new ObjectId(librarianId) : librarianId) : null,
         title: bookTitle,
@@ -326,41 +248,22 @@ app.get("/books/:id", async (req, res) => {
 });
 
 // ==========================================
-// 🧑‍💼 LIBRARIAN DASHBOARD API
+// 🧑‍💼 LIBRARIAN DASHBOARD API (Token Removed)
 // ==========================================
 
-app.get("/api/librarian/stats", verifyToken, async (req, res) => {
+app.get("/api/librarian/stats", async (req, res) => {
   try {
-    const userIdStr = req.user.id ? req.user.id.toString() : "";
-    const query = {
-      $or: [
-        { userId: userIdStr },
-        { userId: ObjectId.isValid(userIdStr) ? new ObjectId(userIdStr) : null },
-        { userEmail: req.user.email },
-        { addedBy: req.user.email }
-      ].filter(Boolean)
-    };
-
-    const myBooks = await booksCollection.countDocuments(query);
+    const myBooks = await booksCollection.countDocuments();
     const approvedBooks = await booksCollection.countDocuments({ 
-      ...query, 
       status: { $in: ["Approved", "Published", "approved", "published"] } 
     });
     
-    const deliveryQuery = {
-      $or: [
-        { librarianId: userIdStr },
-        { librarianId: ObjectId.isValid(userIdStr) ? new ObjectId(userIdStr) : null }
-      ].filter(Boolean)
-    };
-
     const pendingRequests = await deliveryCollection.countDocuments({
-      ...deliveryQuery,
       status: "Pending"
     });
 
     const earningsAgg = await deliveryCollection.aggregate([
-      { $match: { ...deliveryQuery, status: "Delivered" } },
+      { $match: { status: "Delivered" } },
       { $group: { _id: null, total: { $sum: "$deliveryFee" } } }
     ]).toArray();
 
@@ -378,21 +281,13 @@ app.get("/api/librarian/stats", verifyToken, async (req, res) => {
   }
 });
 
-app.post("/api/books", verifyToken, async (req, res) => {
+app.post("/api/books", async (req, res) => {
   try {
     const bookData = req.body;
-    const userRole = (req.user?.role || '').toLowerCase();
-
-    const initialStatus = userRole === 'admin' ? "Approved" : "Pending Approval";
-    const initialIsApproved = userRole === 'admin';
-
     const newBook = {
       ...bookData,
-      userId: req.user.id,
-      userEmail: req.user.email,
-      addedBy: req.user.email,
-      status: bookData.status || initialStatus, 
-      isApproved: initialIsApproved,
+      status: bookData.status || "Approved", 
+      isApproved: true,
       createdAt: new Date()
     };
 
@@ -404,22 +299,13 @@ app.post("/api/books", verifyToken, async (req, res) => {
   }
 });
 
-app.get("/api/librarian/books", verifyToken, async (req, res) => {
+app.get("/api/librarian/books", async (req, res) => {
   try {
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.max(1, Number(req.query.limit) || 10);
     const search = req.query.search || "";
-    const userIdStr = req.user.id ? req.user.id.toString() : "";
 
-    const query = {
-      $or: [
-        { userId: userIdStr },
-        { userId: ObjectId.isValid(userIdStr) ? new ObjectId(userIdStr) : null },
-        { userEmail: req.user.email },
-        { addedBy: req.user.email }
-      ].filter(Boolean)
-    };
-
+    const query = {};
     if (search) query.title = { $regex: search, $options: "i" };
 
     const totalBooks = await booksCollection.countDocuments(query);
@@ -442,7 +328,7 @@ app.get("/api/librarian/books", verifyToken, async (req, res) => {
   }
 });
 
-app.patch("/api/librarian/books/:id", verifyToken, async (req, res) => {
+app.patch("/api/librarian/books/:id", async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ success: false, message: "Invalid ID" });
@@ -450,17 +336,10 @@ app.patch("/api/librarian/books/:id", verifyToken, async (req, res) => {
     const updateData = { ...req.body };
     delete updateData._id;
 
-    const result = await booksCollection.updateOne(
-      { 
-        _id: new ObjectId(id),
-        $or: [{ userId: req.user.id }, { userEmail: req.user.email }] 
-      },
+    await booksCollection.updateOne(
+      { _id: new ObjectId(id) },
       { $set: { ...updateData, updatedAt: new Date() } }
     );
-
-    if (result.matchedCount === 0) {
-      return res.status(404).json({ success: false, message: "Book not found or unauthorized" });
-    }
 
     res.json({ success: true, message: "Book updated successfully" });
   } catch (error) {
@@ -468,27 +347,19 @@ app.patch("/api/librarian/books/:id", verifyToken, async (req, res) => {
   }
 });
 
-app.delete("/api/librarian/books/:id", verifyToken, async (req, res) => {
+app.delete("/api/librarian/books/:id", async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ success: false, message: "Invalid ID" });
 
-    const result = await booksCollection.deleteOne({
-      _id: new ObjectId(id),
-      $or: [{ userId: req.user.id }, { userEmail: req.user.email }]
-    });
-
-    if (result.deletedCount === 0) {
-      return res.status(404).json({ success: false, message: "Book not found or unauthorized" });
-    }
-
+    await booksCollection.deleteOne({ _id: new ObjectId(id) });
     res.json({ success: true, message: "Book deleted successfully" });
   } catch (error) {
     res.status(500).json({ success: false, message: "Server Error" });
   }
 });
 
-app.patch("/api/librarian/books/unpublish/:id", verifyToken, async (req, res) => {
+app.patch("/api/librarian/books/unpublish/:id", async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ success: false, message: "Invalid ID" });
@@ -503,26 +374,12 @@ app.patch("/api/librarian/books/unpublish/:id", verifyToken, async (req, res) =>
   }
 });
 
-app.get("/api/librarian/overview", verifyToken, async (req, res) => {
+app.get("/api/librarian/overview", async (req, res) => {
   try {
-    const userIdStr = req.user.id ? req.user.id.toString() : "";
-    const query = {
-      $or: [
-        { userId: userIdStr },
-        { userId: ObjectId.isValid(userIdStr) ? new ObjectId(userIdStr) : null },
-        { userEmail: req.user.email }
-      ].filter(Boolean)
-    };
-
-    const myBooks = await booksCollection.countDocuments(query);
-    const approvedBooks = await booksCollection.countDocuments({ ...query, status: { $in: ["Approved", "Published"] } });
-    const pendingBooks = await booksCollection.countDocuments({ ...query, status: { $in: ["Pending Approval", "Pending", "pending"] } });
-    const totalRequests = await deliveryCollection.countDocuments({
-      $or: [
-        { librarianId: userIdStr },
-        { librarianId: ObjectId.isValid(userIdStr) ? new ObjectId(userIdStr) : null }
-      ].filter(Boolean)
-    });
+    const myBooks = await booksCollection.countDocuments();
+    const approvedBooks = await booksCollection.countDocuments({ status: { $in: ["Approved", "Published"] } });
+    const pendingBooks = await booksCollection.countDocuments({ status: { $in: ["Pending Approval", "Pending", "pending"] } });
+    const totalRequests = await deliveryCollection.countDocuments();
 
     res.json({ myBooks, publishedBooks: approvedBooks, pendingBooks, totalRequests });
   } catch (err) {
@@ -530,23 +387,16 @@ app.get("/api/librarian/overview", verifyToken, async (req, res) => {
   }
 });
 
-app.get("/api/librarian/deliveries", verifyToken, async (req, res) => {
+app.get("/api/librarian/deliveries", async (req, res) => {
   try {
-    const userIdStr = req.user.id ? req.user.id.toString() : "";
-    const deliveries = await deliveryCollection.find({
-      $or: [
-        { librarianId: userIdStr },
-        { librarianId: ObjectId.isValid(userIdStr) ? new ObjectId(userIdStr) : null }
-      ].filter(Boolean)
-    }).sort({ requestedAt: -1 }).toArray();
-
+    const deliveries = await deliveryCollection.find().sort({ requestedAt: -1 }).toArray();
     res.json(deliveries);
   } catch (err) {
     res.status(500).json({ error: "Server Error" });
   }
 });
 
-app.patch("/api/librarian/deliveries/:id", verifyToken, async (req, res) => {
+app.patch("/api/librarian/deliveries/:id", async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ success: false, message: "Invalid ID" });
@@ -560,26 +410,19 @@ app.patch("/api/librarian/deliveries/:id", verifyToken, async (req, res) => {
 });
 
 // ==========================================
-// 👤 USER DASHBOARD & REVIEWS API
+// 👤 USER DASHBOARD & REVIEWS API (Token Removed)
 // ==========================================
 
-app.get("/api/user/summary", verifyToken, async (req, res) => {
+app.get("/api/user/summary", async (req, res) => {
   try {
-    const userIdStr = req.user.id || req.user._id;
-    if (!ObjectId.isValid(userIdStr)) {
-      return res.status(400).json({ error: "Invalid User ID" });
-    }
-    const userId = new ObjectId(userIdStr);
-
-    const totalOrders = await deliveryCollection.countDocuments({ userId });
-    const pendingOrders = await deliveryCollection.countDocuments({ userId, status: "Pending" });
+    const totalOrders = await deliveryCollection.countDocuments();
+    const pendingOrders = await deliveryCollection.countDocuments({ status: "Pending" });
     
     const paymentAgg = await paymentCollection.aggregate([
-      { $match: { userId } },
       { $group: { _id: null, total: { $sum: "$amount" } } }
     ]).toArray();
 
-    const totalReviews = await reviewCollection.countDocuments({ userId });
+    const totalReviews = await reviewCollection.countDocuments();
 
     res.json({
       totalOrders,
@@ -593,14 +436,10 @@ app.get("/api/user/summary", verifyToken, async (req, res) => {
   }
 });
 
-app.get("/api/user/borrowed-books", verifyToken, async (req, res) => {
+app.get("/api/user/borrowed-books", async (req, res) => {
   try {
-    const userIdStr = req.user.id || req.user._id;
-    if (!ObjectId.isValid(userIdStr)) return res.status(400).json({ error: "Invalid User ID" });
-    const userId = new ObjectId(userIdStr);
-
     const borrowedBooks = await deliveryCollection
-      .find({ userId })
+      .find()
       .sort({ requestedAt: -1 })
       .toArray();
 
@@ -611,13 +450,10 @@ app.get("/api/user/borrowed-books", verifyToken, async (req, res) => {
   }
 });
 
-app.get("/api/user/delivery-history", verifyToken, async (req, res) => {
+app.get("/api/user/delivery-history", async (req, res) => {
   try {
-    const userIdStr = req.user.id || req.user._id;
-    if (!ObjectId.isValid(userIdStr)) return res.status(400).json({ error: "Invalid User ID" });
-
     const history = await deliveryCollection
-      .find({ userId: new ObjectId(userIdStr) })
+      .find()
       .sort({ requestedAt: -1 })
       .toArray();
     res.json(history);
@@ -626,13 +462,10 @@ app.get("/api/user/delivery-history", verifyToken, async (req, res) => {
   }
 });
 
-app.get("/api/user/transactions", verifyToken, async (req, res) => {
+app.get("/api/user/transactions", async (req, res) => {
   try {
-    const userIdStr = req.user.id || req.user._id;
-    if (!ObjectId.isValid(userIdStr)) return res.status(400).json({ error: "Invalid User ID" });
-
     const payments = await paymentCollection
-      .find({ userId: new ObjectId(userIdStr) })
+      .find()
       .sort({ createdAt: -1 })
       .toArray();
     res.json(payments);
@@ -641,13 +474,10 @@ app.get("/api/user/transactions", verifyToken, async (req, res) => {
   }
 });
 
-app.get("/api/user/my-reviews", verifyToken, async (req, res) => {
+app.get("/api/user/my-reviews", async (req, res) => {
   try {
-    const userIdStr = req.user.id || req.user._id;
-    if (!ObjectId.isValid(userIdStr)) return res.status(400).json({ error: "Invalid User ID" });
-
     const reviews = await reviewCollection
-      .find({ userId: new ObjectId(userIdStr) })
+      .find()
       .sort({ createdAt: -1 })
       .toArray();
     res.json(reviews);
@@ -656,32 +486,17 @@ app.get("/api/user/my-reviews", verifyToken, async (req, res) => {
   }
 });
 
-app.post("/api/reviews", verifyToken, async (req, res) => {
+app.post("/api/reviews", async (req, res) => {
   try {
-    const { bookId, rating, comment } = req.body;
-    const userIdStr = req.user.id || req.user._id;
-    if (!bookId || !rating || !comment || !ObjectId.isValid(bookId) || !ObjectId.isValid(userIdStr)) {
+    const { bookId, rating, comment, userName, userPhoto } = req.body;
+    if (!bookId || !rating || !comment || !ObjectId.isValid(bookId)) {
       return res.status(400).json({ success: false, message: "Missing or invalid required fields" });
-    }
-
-    const delivery = await deliveryCollection.findOne({
-      userId: new ObjectId(userIdStr),
-      bookId: new ObjectId(bookId),
-      status: "Delivered",
-    });
-
-    if (!delivery) {
-      return res.status(403).json({
-        success: false,
-        message: "You can only review books that have been Delivered to you.",
-      });
     }
 
     const review = {
       bookId: new ObjectId(bookId),
-      userId: new ObjectId(userIdStr),
-      userName: req.user.name || "Anonymous",
-      userPhoto: req.user.image || "",
+      userName: userName || "Anonymous",
+      userPhoto: userPhoto || "",
       rating: Number(rating),
       comment,
       createdAt: new Date(),
@@ -698,7 +513,7 @@ app.get("/api/reviews/:bookId", async (req, res) => {
   try {
     const { bookId } = req.params;
     if (!ObjectId.isValid(bookId)) return res.status(400).json({ error: "Invalid Book ID" });
-
+    
     const reviews = await reviewCollection
       .find({ bookId: new ObjectId(bookId) })
       .sort({ createdAt: -1 })
@@ -710,10 +525,10 @@ app.get("/api/reviews/:bookId", async (req, res) => {
 });
 
 // ==========================================
-// 👑 ADMIN DASHBOARD API
+// 👑 ADMIN DASHBOARD API (Token & Admin Check Removed)
 // ==========================================
 
-app.get("/api/admin/chart", verifyToken, isAdmin, async (req, res) => {
+app.get("/api/admin/chart", async (req, res) => {
   try {
     const totalUsers = await userCollection.countDocuments();
     const totalBooks = await booksCollection.countDocuments();
@@ -741,7 +556,7 @@ app.get("/api/admin/chart", verifyToken, isAdmin, async (req, res) => {
   }
 });
 
-app.get("/api/admin/books", verifyToken, isAdmin, async (req, res) => {
+app.get("/api/admin/books", async (req, res) => {
   try {
     const books = await booksCollection.find().sort({ createdAt: -1 }).toArray();
     res.json(books);
@@ -750,7 +565,7 @@ app.get("/api/admin/books", verifyToken, isAdmin, async (req, res) => {
   }
 });
 
-app.patch("/api/admin/books/approve/:id", verifyToken, isAdmin, async (req, res) => {
+app.patch("/api/admin/books/approve/:id", async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid ID" });
@@ -765,7 +580,7 @@ app.patch("/api/admin/books/approve/:id", verifyToken, isAdmin, async (req, res)
   }
 });
 
-app.patch("/api/admin/books/reject/:id", verifyToken, isAdmin, async (req, res) => {
+app.patch("/api/admin/books/reject/:id", async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid ID" });
@@ -780,7 +595,7 @@ app.patch("/api/admin/books/reject/:id", verifyToken, isAdmin, async (req, res) 
   }
 });
 
-app.patch("/api/admin/books/unpublish/:id", verifyToken, isAdmin, async (req, res) => {
+app.patch("/api/admin/books/unpublish/:id", async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid ID" });
@@ -795,7 +610,7 @@ app.patch("/api/admin/books/unpublish/:id", verifyToken, isAdmin, async (req, re
   }
 });
 
-app.delete("/api/admin/books/:id", verifyToken, isAdmin, async (req, res) => {
+app.delete("/api/admin/books/:id", async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid ID" });
@@ -807,7 +622,7 @@ app.delete("/api/admin/books/:id", verifyToken, isAdmin, async (req, res) => {
   }
 });
 
-app.get("/api/admin/users", verifyToken, isAdmin, async (req, res) => {
+app.get("/api/admin/users", async (req, res) => {
   try {
     const users = await userCollection.find().toArray();
     res.json(users);
@@ -816,7 +631,7 @@ app.get("/api/admin/users", verifyToken, isAdmin, async (req, res) => {
   }
 });
 
-app.patch("/api/admin/users/:id", verifyToken, isAdmin, async (req, res) => {
+app.patch("/api/admin/users/:id", async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid ID" });
@@ -832,7 +647,7 @@ app.patch("/api/admin/users/:id", verifyToken, isAdmin, async (req, res) => {
   }
 });
 
-app.delete("/api/admin/users/:id", verifyToken, isAdmin, async (req, res) => {
+app.delete("/api/admin/users/:id", async (req, res) => {
   try {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid ID" });
@@ -844,7 +659,7 @@ app.delete("/api/admin/users/:id", verifyToken, isAdmin, async (req, res) => {
   }
 });
 
-app.get("/api/admin/transactions", verifyToken, isAdmin, async (req, res) => {
+app.get("/api/admin/transactions", async (req, res) => {
   try {
     const transactions = await paymentCollection.find().sort({ createdAt: -1 }).toArray();
     res.json(transactions);
