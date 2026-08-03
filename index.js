@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 5000;
 // ⚙️ OPEN CORS & MIDDLEWARE SETUP
 // ==========================================
 app.use(cors({
-  origin: true, // সব ডোমেইন এবং Vercel প্রিভিউ লিংক অ্যালাও করা হলো
+  origin: true,
   credentials: true,
   methods: ["GET", "POST", "PATCH", "DELETE", "PUT", "OPTIONS"]
 }));
@@ -84,10 +84,25 @@ app.use(async (req, res, next) => {
 });
 
 // ==========================================
-// 🏠 ROOT ROUTE
+// 🏠 ROOT ROUTE & ROLE CHECK API
 // ==========================================
 app.get("/", (req, res) => {
-  res.send("Biblio Drop Server is running successfully without security barriers!");
+  res.send("Biblio Drop Server is running successfully!");
+});
+
+app.get("/api/user-role", async (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) return res.status(400).json({ error: "Email is required" });
+
+    const dbUser = await userCollection.findOne({ email });
+    if (!dbUser) return res.status(404).json({ error: "User not found in database" });
+
+    res.json({ success: true, role: dbUser.role || "user" });
+  } catch (err) {
+    console.error("Error fetching user role:", err);
+    res.status(500).json({ error: "Server Error" });
+  }
 });
 
 // ==========================================
