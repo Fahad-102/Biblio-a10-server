@@ -4,7 +4,6 @@ require('dotenv').config();
 
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
-const { toNodeHandler } = require("better-auth/node");
 const { auth } = require("./auth");
 
 const app = express();
@@ -41,7 +40,12 @@ app.use(express.json());
 // 🔐 BETTER AUTH API ROUTE HANDLER
 // ==========================================
 app.all("/api/auth/*", async (req, res) => {
-  return toNodeHandler(auth)(req, res);
+  try {
+    return await auth.handler(req, res);
+  } catch (error) {
+    console.error("Auth Handler Error:", error);
+    return res.status(500).json({ error: error.message });
+  }
 });
 
 // ==========================================
