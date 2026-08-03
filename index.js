@@ -6,22 +6,35 @@ require('dotenv').config();
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const { toNodeHandler } = require("better-auth/node");
-const { auth } = require("./auth"); // আপনার auth.js ফাইলটি যে ফোল্ডারে আছে সেই পাথ দিন
+const { auth } = require("./auth");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 // ==========================================
-// ⚙️ OPEN CORS & MIDDLEWARE SETUP
+// ⚙️ CORS & PREFLIGHT SETUP (FIXED)
 // ==========================================
+const allowedOrigins = [
+  "http://localhost:3000",
+  "https://biblio-drop-a10.vercel.app"
+];
+
 app.use(cors({
-  origin: [
-    "http://localhost:3000",
-    "https://biblio-drop-a10.vercel.app"
-  ],
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
-  methods: ["GET", "POST", "PATCH", "DELETE", "PUT", "OPTIONS"]
+  methods: ["GET", "POST", "PATCH", "DELETE", "PUT", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept"]
 }));
+
+// Handle preflight requests explicitly for all routes
+app.options('*', cors());
+
 app.use(cookieParser());
 app.use(express.json());
 
@@ -486,7 +499,6 @@ app.post("/api/reviews", async (req, res) => {
       return res.status(400).json({ success: false, message: "Missing or invalid required fields" });
     }
 
-    // Optional: Verified Review check (Ensuring user has a 'Delivered' status)
     if (userEmail) {
       const deliveredCheck = await deliveryCollection.findOne({ userEmail, status: "Delivered" });
       if (!deliveredCheck) {
