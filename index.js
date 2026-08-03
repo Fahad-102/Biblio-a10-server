@@ -40,10 +40,16 @@ app.use(express.json());
 // ==========================================
 const { initAuth } = require("./auth");
 
+let toNodeHandlerFn = null;
+
 app.all("/api/auth/*splat", async (req, res) => {
   try {
+    if (!toNodeHandlerFn) {
+      const { toNodeHandler } = await import("better-auth/node");
+      toNodeHandlerFn = toNodeHandler;
+    }
     const auth = await initAuth();
-    return await auth.handler(req, res);
+    return toNodeHandlerFn(auth)(req, res);
   } catch (error) {
     console.error("Auth Handler Error:", error);
     return res.status(500).json({ error: error.message });
