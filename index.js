@@ -119,17 +119,12 @@ const verifyToken = async (req, res, next) => {
       return res.status(401).json({ msg: "No token found" });
     }
 
-    const sessionToken = rawToken.includes('.') ? rawToken.split('.')[0] : rawToken; 
-
-    // BetterAuth সেশন খোঁজার জন্য বহুমুখী কোয়েরি (Token, ID, অথবা SessionToken)
+    // টোকেন ভাঙার সমস্যা এড়ানোর জন্য সরাসরি rawToken ব্যবহার করা হয়েছে
     let session = await sessionCollection.findOne({
       $or: [
-        { token: sessionToken },
         { token: rawToken },
-        { id: sessionToken },
-        { id: rawToken },
-        { sessionToken: sessionToken },
-        { sessionToken: rawToken }
+        { sessionToken: rawToken },
+        { id: rawToken }
       ]
     });
 
