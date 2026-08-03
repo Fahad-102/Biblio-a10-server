@@ -11,8 +11,9 @@ async function initAuth() {
     const { betterAuth } = await import("better-auth");
     const { mongodbAdapter } = await import("better-auth/adapters/mongodb");
 
-    const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
+   const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
     const client = new MongoClient(uri);
+    await client.connect();
     const db = client.db(process.env.AUTH_DB_NAME || "biblio-drop_db");
 
     authInstance = betterAuth({
