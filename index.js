@@ -1,6 +1,5 @@
 const express = require('express');
 const cookieParser = require('cookie-parser');
-const cors = require('cors');
 require('dotenv').config();
 
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
@@ -12,7 +11,7 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // ==========================================
-// ⚙️ CUSTOM CORS & PREFLIGHT SETUP (FIXED)
+// ⚙️ CUSTOM CORS & PREFLIGHT SETUP
 // ==========================================
 const allowedOrigins = [
   "http://localhost:3000",
@@ -29,12 +28,20 @@ app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept");
 
-  // Handle Preflight OPTIONS request instantly
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
-  
   next();
+});
+
+app.use(cookieParser());
+app.use(express.json());
+
+// ==========================================
+// 🔐 BETTER AUTH API ROUTE HANDLER (MUST BE HERE)
+// ==========================================
+app.all("/api/auth/*", async (req, res) => {
+  return toNodeHandler(auth)(req, res);
 });
 
 // ==========================================
@@ -89,7 +96,7 @@ async function dbConnect() {
   return { client, db };
 }
 
-// Global DB Middleware
+// Global DB Middleware for other APIs
 app.use(async (req, res, next) => {
   try {
     await dbConnect();
@@ -98,13 +105,6 @@ app.use(async (req, res, next) => {
     console.error("MongoDB Connection Error:", err);
     res.status(500).json({ error: "Database Connection Error" });
   }
-});
-
-// ==========================================
-// 🔐 BETTER AUTH API ROUTE HANDLER
-// ==========================================
-app.all("/api/auth/*", async (req, res) => {
-  return toNodeHandler(auth)(req, res);
 });
 
 // ==========================================
