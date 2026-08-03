@@ -5,6 +5,8 @@ require('dotenv').config();
 
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const { toNodeHandler } = require("better-auth/node");
+const { auth } = require("./auth"); // আপনার auth.js ফাইলটি যে ফোল্ডারে আছে সেই পাথ দিন
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -13,7 +15,10 @@ const PORT = process.env.PORT || 5000;
 // ⚙️ OPEN CORS & MIDDLEWARE SETUP
 // ==========================================
 app.use(cors({
-  origin: true,
+  origin: [
+    "http://localhost:3000",
+    "https://biblio-drop-a10.vercel.app"
+  ],
   credentials: true,
   methods: ["GET", "POST", "PATCH", "DELETE", "PUT", "OPTIONS"]
 }));
@@ -81,6 +86,13 @@ app.use(async (req, res, next) => {
     console.error("MongoDB Connection Error:", err);
     res.status(500).json({ error: "Database Connection Error" });
   }
+});
+
+// ==========================================
+// 🔐 BETTER AUTH API ROUTE HANDLER
+// ==========================================
+app.all("/api/auth/*", async (req, res) => {
+  return toNodeHandler(auth)(req, res);
 });
 
 // ==========================================
@@ -383,19 +395,6 @@ app.patch("/api/librarian/books/unpublish/:id", async (req, res) => {
   }
 });
 
-app.get("/api/librarian/overview", async (req, res) => {
-  try {
-    const myBooks = await booksCollection.countDocuments();
-    const approvedBooks = await booksCollection.countDocuments({ status: { $in: ["Approved", "Published"] } });
-    const pendingBooks = await booksCollection.countDocuments({ status: { $in: ["Pending Approval", "Pending", "pending"] } });
-    const totalRequests = await deliveryCollection.countDocuments();
-
-    res.json({ myBooks, publishedBooks: approvedBooks, pendingBooks, totalRequests });
-  } catch (err) {
-    res.status(500).json({ error: "Server Error" });
-  }
-});
-
 app.get("/api/librarian/deliveries", async (req, res) => {
   try {
     const deliveries = await deliveryCollection.find().sort({ requestedAt: -1 }).toArray();
@@ -446,24 +445,16 @@ app.get("/api/user/summary", async (req, res) => {
 
 app.get("/api/user/borrowed-books", async (req, res) => {
   try {
-    const borrowedBooks = await deliveryCollection
-      .find()
-      .sort({ requestedAt: -1 })
-      .toArray();
-
+    const borrowedBooks = await deliveryCollection.find().sort({ requestedAt: -1 }).toArray();
     res.json(borrowedBooks);
   } catch (err) {
-    console.error("Error fetching borrowed books:", err);
     res.status(500).json({ error: "Server Error" });
   }
 });
 
 app.get("/api/user/delivery-history", async (req, res) => {
   try {
-    const history = await deliveryCollection
-      .find()
-      .sort({ requestedAt: -1 })
-      .toArray();
+    const history = await deliveryCollection.find().sort({ requestedAt: -1 }).toArray();
     res.json(history);
   } catch (err) {
     res.status(500).json({ error: "Server Error" });
@@ -472,10 +463,7 @@ app.get("/api/user/delivery-history", async (req, res) => {
 
 app.get("/api/user/transactions", async (req, res) => {
   try {
-    const payments = await paymentCollection
-      .find()
-      .sort({ createdAt: -1 })
-      .toArray();
+    const payments = await paymentCollection.find().sort({ createdAt: -1 }).toArray();
     res.json(payments);
   } catch (err) {
     res.status(500).json({ error: "Server Error" });
@@ -484,10 +472,7 @@ app.get("/api/user/transactions", async (req, res) => {
 
 app.get("/api/user/my-reviews", async (req, res) => {
   try {
-    const reviews = await reviewCollection
-      .find()
-      .sort({ createdAt: -1 })
-      .toArray();
+    const reviews = await reviewCollection.find().sort({ createdAt: -1 }).toArray();
     res.json(reviews);
   } catch (err) {
     res.status(500).json({ error: "Server Error" });
@@ -496,9 +481,17 @@ app.get("/api/user/my-reviews", async (req, res) => {
 
 app.post("/api/reviews", async (req, res) => {
   try {
-    const { bookId, rating, comment, userName, userPhoto } = req.body;
+    const { bookId, rating, comment, userName, userPhoto, userEmail } = req.body;
     if (!bookId || !rating || !comment || !ObjectId.isValid(bookId)) {
       return res.status(400).json({ success: false, message: "Missing or invalid required fields" });
+    }
+
+    // Optional: Verified Review check (Ensuring user has a 'Delivered' status)
+    if (userEmail) {
+      const deliveredCheck = await deliveryCollection.findOne({ userEmail, status: "Delivered" });
+      if (!deliveredCheck) {
+        return res.status(403).json({ success: false, message: "You can only review books after delivery completion." });
+      }
     }
 
     const review = {
@@ -522,10 +515,7 @@ app.get("/api/reviews/:bookId", async (req, res) => {
     const { bookId } = req.params;
     if (!ObjectId.isValid(bookId)) return res.status(400).json({ error: "Invalid Book ID" });
     
-    const reviews = await reviewCollection
-      .find({ bookId: new ObjectId(bookId) })
-      .sort({ createdAt: -1 })
-      .toArray();
+    const reviews = await reviewCollection.find({ bookId: new ObjectId(bookId) }).sort({ createdAt: -1 }).toArray();
     res.json(reviews);
   } catch (err) {
     res.status(500).json({ error: "Server Error" });
@@ -597,21 +587,6 @@ app.patch("/api/admin/books/reject/:id", async (req, res) => {
       { $set: { status: "Rejected", isApproved: false } }
     );
     res.json({ success: true, message: "Book Rejected" });
-  } catch (err) {
-    res.status(500).json({ error: "Server Error" });
-  }
-});
-
-app.patch("/api/admin/books/unpublish/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid ID" });
-
-    await booksCollection.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: { status: "Unpublished", isApproved: false } }
-    );
-    res.json({ success: true, message: "Book Unpublished" });
   } catch (err) {
     res.status(500).json({ error: "Server Error" });
   }
