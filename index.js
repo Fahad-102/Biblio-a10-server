@@ -4,7 +4,6 @@ require('dotenv').config();
 
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
-const { auth } = require("./auth");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -39,8 +38,11 @@ app.use(express.json());
 // ==========================================
 // 🔐 BETTER AUTH API ROUTE HANDLER
 // ==========================================
+const { initAuth } = require("./auth");
+
 app.all("/api/auth/*", async (req, res) => {
   try {
+    const auth = await initAuth();
     return await auth.handler(req, res);
   } catch (error) {
     console.error("Auth Handler Error:", error);
