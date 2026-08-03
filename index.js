@@ -12,31 +12,30 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // ==========================================
-// ⚙️ CORS & PREFLIGHT SETUP (FIXED)
+// ⚙️ CUSTOM CORS & PREFLIGHT SETUP (FIXED)
 // ==========================================
 const allowedOrigins = [
   "http://localhost:3000",
   "https://biblio-drop-a10.vercel.app"
 ];
 
-app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  credentials: true,
-  methods: ["GET", "POST", "PATCH", "DELETE", "PUT", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept"]
-}));
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+  
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept");
 
-// Handle preflight requests explicitly for all routes
-app.options('*', cors());
-
-app.use(cookieParser());
-app.use(express.json());
+  // Handle Preflight OPTIONS request instantly
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+  
+  next();
+});
 
 // ==========================================
 // 🗄️ DATABASE CONNECTION & CACHING
