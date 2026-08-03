@@ -23,9 +23,7 @@ async function initAuth() {
         "http://localhost:3000",
         process.env.CLIENT_URL || "https://biblio-drop-a10.vercel.app"
       ],
-      emailAndPassword: {
-        enabled: true,
-      },
+      emailAndPassword: { enabled: true },
       socialProviders: {
         google: {
           clientId: process.env.GOOGLE_CLIENT_ID,
