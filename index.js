@@ -40,7 +40,7 @@ app.use(express.json());
 // ==========================================
 const { initAuth } = require("./auth");
 
-app.all("/api/auth/*", async (req, res) => {
+app.all("/api/auth/*splat", async (req, res) => {
   try {
     const auth = await initAuth();
     return await auth.handler(req, res);
