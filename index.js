@@ -10,13 +10,10 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // ==========================================
-// ⚙️ MIDDLEWARE SETUP
+// ⚙️ OPEN CORS & MIDDLEWARE SETUP
 // ==========================================
 app.use(cors({
-  origin: [
-    "http://localhost:3000",
-    "https://biblio-drop-a10.vercel.app"
-  ],
+  origin: true, // সব ডোমেইন এবং Vercel প্রিভিউ লিংক অ্যালাও করা হলো
   credentials: true,
   methods: ["GET", "POST", "PATCH", "DELETE", "PUT", "OPTIONS"]
 }));
@@ -90,13 +87,12 @@ app.use(async (req, res, next) => {
 // 🏠 ROOT ROUTE
 // ==========================================
 app.get("/", (req, res) => {
-  res.send("Biblio Drop Server is running successfully!");
+  res.send("Biblio Drop Server is running successfully without security barriers!");
 });
 
 // ==========================================
-// 💳 STRIPE PAYMENTS (Token Removed)
+// 💳 STRIPE PAYMENTS
 // ==========================================
-
 app.post("/api/create-checkout-session", async (req, res) => {
   try {
     const { bookId, userId, userEmail } = req.body;
@@ -191,7 +187,6 @@ app.post("/api/payments/confirm", async (req, res) => {
 // ==========================================
 // 📚 PUBLIC BOOKS API
 // ==========================================
-
 app.get("/books", async (req, res) => {
   try {
     const { search = "", category, availability, minFee, maxFee, page = 1, limit = 6 } = req.query;
@@ -248,9 +243,8 @@ app.get("/books/:id", async (req, res) => {
 });
 
 // ==========================================
-// 🧑‍💼 LIBRARIAN DASHBOARD API (Token Removed)
+// 🧑‍💼 LIBRARIAN DASHBOARD API
 // ==========================================
-
 app.get("/api/librarian/stats", async (req, res) => {
   try {
     const myBooks = await booksCollection.countDocuments();
@@ -410,9 +404,8 @@ app.patch("/api/librarian/deliveries/:id", async (req, res) => {
 });
 
 // ==========================================
-// 👤 USER DASHBOARD & REVIEWS API (Token Removed)
+// 👤 USER DASHBOARD & REVIEWS API
 // ==========================================
-
 app.get("/api/user/summary", async (req, res) => {
   try {
     const totalOrders = await deliveryCollection.countDocuments();
@@ -525,9 +518,8 @@ app.get("/api/reviews/:bookId", async (req, res) => {
 });
 
 // ==========================================
-// 👑 ADMIN DASHBOARD API (Token & Admin Check Removed)
+// 👑 ADMIN DASHBOARD API
 // ==========================================
-
 app.get("/api/admin/chart", async (req, res) => {
   try {
     const totalUsers = await userCollection.countDocuments();
